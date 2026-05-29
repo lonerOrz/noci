@@ -6,6 +6,7 @@ import (
 	"noci/pkg/gc"
 	"noci/pkg/log"
 	"noci/pkg/oci"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -86,6 +87,13 @@ func runGC(cmd *cobra.Command, args []string) error {
 			entry := index.Entries[key]
 			log.Action("Deleting blob for %s (%s)...", key, entry.Name)
 			if err := client.DeleteBlob(ctx, entry.NarDigest); err != nil {
+				errMsg := err.Error()
+				// 如果捕获到 405 / UNSUPPORTED，说明当前 OCI 平台（如 GHCR）不支持物理擦除
+				if strings.Contains(errMsg, "405") || strings.Contains(errMsg, "UNSUPPORTED") {
+					log.Warning("The OCI registry does not support physical blob deletion (HTTP 405). " +
+						"Skipping remaining physical sweeps; relying on registry-side automatic GC (soft-delete is active).")
+					break
+				}
 				log.Warning("Failed to delete blob %s: %v", entry.NarDigest, err)
 			}
 		}
