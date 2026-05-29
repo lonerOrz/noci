@@ -304,3 +304,11 @@ func (c *Client) PushIndex(ctx context.Context, idx *CacheIndex) error {
 
 	return nil
 }
+
+func (c *Client) Registry() string {
+	return c.registry
+}
+
+func (c *Client) Repo() string {
+	return c.repo
+}

@@ -3,7 +3,6 @@ package cmd
 import (
 	"fmt"
 	"noci/pkg/server"
-	"os"
 	"strconv"
 
 	"github.com/spf13/cobra"
@@ -34,34 +33,15 @@ func init() {
 }
 
 func runProxy(cmd *cobra.Command, args []string) error {
-	registry := proxyRegistry
-	if registry == "" {
-		registry = os.Getenv("NOCI_REGISTRY")
-	}
-	if registry == "" {
-		registry = "ghcr.io"
-	}
-
-	repo := proxyRepo
-	if repo == "" {
-		repo = os.Getenv("NOCI_REPO")
-	}
-	if repo == "" && os.Getenv("GITHUB_ACTIONS") == "true" {
-		repo = os.Getenv("GITHUB_REPOSITORY")
-	}
-	if repo == "" {
-		return fmt.Errorf("repository is required (specify via --repo or NOCI_REPO/GITHUB_REPOSITORY env)")
-	}
-
-	token := os.Getenv("NOCI_TOKEN")
-	if token == "" {
-		token = os.Getenv("GITHUB_TOKEN")
+	cfg, err := resolveOCIConfig(proxyRegistry, proxyRepo)
+	if err != nil {
+		return err
 	}
 
 	addr := proxyListen + ":" + strconv.Itoa(proxyPort)
+	srv := server.NewServer(cfg.Registry, cfg.Repo, cfg.Token, addr, proxyUpstream, proxyTTL)
 
-	srv := server.NewServer(registry, repo, token, addr, proxyUpstream, proxyTTL)
 	fmt.Printf(">>> Starting proxy on http://%s\n", addr)
-	fmt.Printf(">>> Target OCI repository: %s/%s\n", registry, repo)
+	fmt.Printf(">>> Target OCI repository: %s/%s\n", cfg.Registry, cfg.Repo)
 	return srv.Start()
 }

@@ -85,3 +85,35 @@ func GetPathInfo(storePath string) (*PathInfo, error) {
 
 	return nil, fmt.Errorf("failed to parse nix path-info output: %s", out.String())
 }
+
+// BuildTarget 执行本地 `nix build` 命令获取其 JSON 形式的输出路径
+func BuildTarget(target string) ([]string, error) {
+	cmd := exec.Command("nix", "build", target, "--no-link", "--json")
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &errOut
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("%v: %s", err, errOut.String())
+	}
+	return ParseJSONBuildOutputs(out.Bytes())
+}
+
+// ParseJSONBuildOutputs 解析 nix build --json 输出的包路径信息
+func ParseJSONBuildOutputs(data []byte) ([]string, error) {
+	var buildOutputs []map[string]interface{}
+	if err := json.Unmarshal(data, &buildOutputs); err != nil {
+		return nil, err
+	}
+	var paths []string
+	for _, out := range buildOutputs {
+		if outs, ok := out["outputs"].(map[string]interface{}); ok {
+			for _, pathVal := range outs {
+				if pStr, ok := pathVal.(string); ok {
+					paths = append(paths, pStr)
+				}
+			}
+		}
+	}
+	return paths, nil
+}

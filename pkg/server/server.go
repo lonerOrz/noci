@@ -62,22 +62,22 @@ func (s *Server) refreshIndexLocked() {
 	}
 }
 
-// GetIndex 安全获取远程缓存索引
+// GetIndex 安全获取远程缓存索引（带有更直观的多重检查锁定路径）
 func (s *Server) GetIndex() *oci.CacheIndex {
 	s.mu.RLock()
-	// 正常缓存命中的快路径
-	if s.index != nil && time.Since(s.lastIndexFetch) <= time.Duration(s.ttl)*time.Second {
-		defer s.mu.RUnlock()
-		return s.index
+	isCacheValid := s.index != nil && time.Since(s.lastIndexFetch) <= time.Duration(s.ttl)*time.Second
+	if isCacheValid {
+		idx := s.index
+		s.mu.RUnlock()
+		return idx
 	}
 	s.mu.RUnlock()
 
-	// 缓存过期或未加载，进入写锁状态
+	// 缓存过期或未加载，升级至写锁状态
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	// 双重检查锁定 (Double-Checked Locking)
-	// 防止高并发下多个请求同时释放读锁并排队获取写锁，导致重复向远端拉取多次索引
 	if s.index == nil || time.Since(s.lastIndexFetch) > time.Duration(s.ttl)*time.Second {
 		s.refreshIndexLocked()
 	}

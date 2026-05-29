@@ -17,57 +17,58 @@ func (s *Server) HandleNixCacheInfo(w http.ResponseWriter, r *http.Request) {
 func (s *Server) HandleRoutes(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/")
 
-	if path == "public-key" {
-		idx := s.GetIndex()
-		if idx != nil && idx.PublicKey != "" {
-			w.Header().Set("Content-Type", "text/plain")
-			_, _ = w.Write([]byte(idx.PublicKey + "\n"))
+	switch {
+	case path == "public-key":
+		s.handlePublicKey(w, r)
+	case strings.HasSuffix(path, ".narinfo"):
+		s.handleNarInfo(w, r, strings.TrimSuffix(path, ".narinfo"))
+	case strings.HasPrefix(path, "nar/"):
+		s.handleNar(w, r, strings.TrimPrefix(path, "nar/"))
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func (s *Server) handlePublicKey(w http.ResponseWriter, r *http.Request) {
+	idx := s.GetIndex()
+	if idx != nil && idx.PublicKey != "" {
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = w.Write([]byte(idx.PublicKey + "\n"))
+		return
+	}
+	http.Error(w, "Public key not found", http.StatusNotFound)
+}
+
+func (s *Server) handleNarInfo(w http.ResponseWriter, r *http.Request, hash string) {
+	idx := s.GetIndex()
+	if idx != nil {
+		if item, exists := idx.Entries[hash]; exists {
+			w.Header().Set("Content-Type", "text/x-nix-narinfo")
+			_, _ = w.Write([]byte(item.NarInfo))
 			return
 		}
-		http.Error(w, "Public key not found", http.StatusNotFound)
-		return
 	}
 
-	// 1. 处理 .narinfo 查询
-if strings.HasSuffix(path, ".narinfo") {
-		hash := strings.TrimSuffix(path, ".narinfo")
-		idx := s.GetIndex()
-		if idx != nil {
-			if item, exists := idx.Entries[hash]; exists {
-				w.Header().Set("Content-Type", "text/x-nix-narinfo")
-				_, _ = w.Write([]byte(item.NarInfo))
-				return
-			}
-		}
+	// 本地未命中，透明代理回上游官方源
+	s.proxyToUpstream(w, r, hash+".narinfo")
+}
 
-		// 本地未命中，透明代理回上游 nixos.org
-		s.proxyToUpstream(w, r, path)
-		return
+func (s *Server) handleNar(w http.ResponseWriter, r *http.Request, filename string) {
+	hash := filename
+	if idx := strings.Index(filename, "."); idx != -1 {
+		hash = filename[:idx]
 	}
 
-	// 2. 处理 /nar/*.nar.gz 归档下载
-	if strings.HasPrefix(path, "nar/") {
-		filename := strings.TrimPrefix(path, "nar/")
-		hash := ""
-		if idx := strings.Index(filename, "."); idx != -1 {
-			hash = filename[:idx]
+	idx := s.GetIndex()
+	if idx != nil && hash != "" {
+		if item, exists := idx.Entries[hash]; exists {
+			s.streamBlob(w, item.NarDigest)
+			return
 		}
-
-		idx := s.GetIndex()
-		if idx != nil && hash != "" {
-			if item, exists := idx.Entries[hash]; exists {
-				// 获取 OCI 对应的 Blob 摘要，流式回传客户端
-				s.streamBlob(w, item.NarDigest)
-				return
-			}
-		}
-
-		// 本地未命中，代理回上游
-		s.proxyToUpstream(w, r, path)
-		return
 	}
 
-	http.NotFound(w, r)
+	// 本地未命中，透明代理回上游官方源
+	s.proxyToUpstream(w, r, "nar/"+filename)
 }
 
 func (s *Server) streamBlob(w http.ResponseWriter, digest string) {
@@ -86,7 +87,7 @@ func (s *Server) streamBlob(w http.ResponseWriter, digest string) {
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", resp.ContentLength))
 	}
 
-	// 以 64 KB 的缓冲区直接流式回传（零内存暂存）
+	// 64 KB 零高位内存驻存极速流式回传
 	buf := make([]byte, 64*1024)
 	_, _ = io.CopyBuffer(w, resp.Body, buf)
 }
