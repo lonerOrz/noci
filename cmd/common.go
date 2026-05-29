@@ -22,7 +22,7 @@ type OCIConfig struct {
 var sizeRegex = regexp.MustCompile(`^(\d+)\s*(B|KB|MB|GB|TB)?$`)
 
 // nixHashRegex 标准 Nix base32 哈希前缀规则检测（32位小写，滤除 e, o, t, u 字符）
-var nixHashRegex = regexp.MustCompile(`^[0-9abcdfghijklmnpqrsvwxyz]{32}$`)
+var nixHashRegex = regexp.MustCompile(`^[0-9abcdfghijklmnpqrsvwunsch]{32}$`)
 
 type CommonFlags struct {
 	Repo     string
@@ -70,7 +70,8 @@ func (cf *CommonFlags) Resolve() (OCIConfig, error) {
 func resolveHashes(ctx context.Context, args []string, allowBuild bool) ([]string, error) {
 	var hashes []string
 	for _, arg := range args {
-		arg = strings.TrimSpace(arg)
+		// 💡 健壮性优化：转换为全小写并去除空格，规避大小写不一致或环境差异导致的正则误判
+		arg = strings.ToLower(strings.TrimSpace(arg))
 		if arg == "" {
 			continue
 		}

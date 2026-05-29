@@ -51,7 +51,7 @@ func (s *Server) Start(ctx context.Context) error {
 		Handler: mux,
 	}
 
-	// 优雅关闭监听器
+	// 关闭监听器
 	go func() {
 		<-ctx.Done()
 		log.Info("Shutting down HTTP listeners gracefully...")
@@ -119,10 +119,11 @@ func (s *Server) startUpdateWorker(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			// 当上下文取消时，确保剩余积攒的 LastUsed 数据全部安全写回 OCI
+			// 父级 ctx 已经取消，衍生 WithTimeout 将直接失败。
+			// 因此必须使用不受污染的全新 context.Background() 派生 1 分钟安全回写垫。
 			if len(pendingUpdates) > 0 {
 				log.Info("Flushing remaining LastUsed updates before shutdown...")
-				s.flushLastUsedUpdates(pendingUpdates)
+				s.flushLastUsedUpdates(context.Background(), pendingUpdates)
 			}
 			return
 		case hash, ok := <-s.updateChan:
@@ -131,26 +132,25 @@ func (s *Server) startUpdateWorker(ctx context.Context) {
 			}
 			pendingUpdates[hash] = time.Now()
 			if len(pendingUpdates) >= 100 {
-				s.flushLastUsedUpdates(pendingUpdates)
+				s.flushLastUsedUpdates(ctx, pendingUpdates)
 				pendingUpdates = make(map[string]time.Time)
 			}
 		case <-ticker.C:
 			if len(pendingUpdates) > 0 {
-				s.flushLastUsedUpdates(pendingUpdates)
+				s.flushLastUsedUpdates(ctx, pendingUpdates)
 				pendingUpdates = make(map[string]time.Time)
 			}
 		}
 	}
 }
 
-func (s *Server) flushLastUsedUpdates(updates map[string]time.Time) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
+// flushLastUsedUpdates 实现严格的锁分离（Lock Isolation）与 OCI I/O 挂载，彻底清除写锁挂起。
+func (s *Server) flushLastUsedUpdates(ctx context.Context, updates map[string]time.Time) {
+	// 锁区间外：进行重型的网络远程拉取读 I/O，此时读锁依然可以被其他协程 GetIndex() 高频并发获取，完全不断流
+	ioCtx, cancel := context.WithTimeout(ctx, 1*time.Minute)
 	defer cancel()
 
-	idx, err := s.client.FetchIndex(ctx)
+	idx, err := s.client.FetchIndex(ioCtx)
 	if err != nil {
 		log.Warning("Failed to fetch index for LastUsed flush: %v", err)
 		return
@@ -169,12 +169,17 @@ func (s *Server) flushLastUsedUpdates(updates map[string]time.Time) {
 		return
 	}
 
-	// 推送回写
-	if err := s.client.PushIndex(ctx, idx); err == nil {
-		s.index = idx
-		s.lastIndexFetch = time.Now()
-		log.Success("Successfully flushed %d LastUsed updates to OCI.", len(updates))
-	} else {
+	// 锁区间外：进行重型的网络远程推送写 I/O
+	if err := s.client.PushIndex(ioCtx, idx); err != nil {
 		log.Warning("Failed to flush LastUsed updates to OCI: %v", err)
+		return
 	}
+
+	// 锁区间内：仅在原地改写指针和更新计数器时
+	s.mu.Lock()
+	s.index = idx
+	s.lastIndexFetch = time.Now()
+	s.mu.Unlock()
+
+	log.Success("Successfully flushed %d LastUsed updates to OCI.", len(updates))
 }
