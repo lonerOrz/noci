@@ -31,16 +31,37 @@ func init() {
 	proxyCmd.Flags().StringVar(&proxyListen, "listen", "127.0.0.1", "Listen address")
 	proxyCmd.Flags().StringVar(&proxyUpstream, "upstream", "https://cache.nixos.org", "Fallback upstream cache")
 	proxyCmd.Flags().IntVar(&proxyTTL, "ttl", 300, "Index TTL in seconds")
-
-	_ = proxyCmd.MarkFlagRequired("repo")
 }
 
 func runProxy(cmd *cobra.Command, args []string) error {
-	token := os.Getenv("GITHUB_TOKEN")
+	registry := proxyRegistry
+	if registry == "" {
+		registry = os.Getenv("NOCI_REGISTRY")
+	}
+	if registry == "" {
+		registry = "ghcr.io"
+	}
+
+	repo := proxyRepo
+	if repo == "" {
+		repo = os.Getenv("NOCI_REPO")
+	}
+	if repo == "" && os.Getenv("GITHUB_ACTIONS") == "true" {
+		repo = os.Getenv("GITHUB_REPOSITORY")
+	}
+	if repo == "" {
+		return fmt.Errorf("repository is required (specify via --repo or NOCI_REPO/GITHUB_REPOSITORY env)")
+	}
+
+	token := os.Getenv("NOCI_TOKEN")
+	if token == "" {
+		token = os.Getenv("GITHUB_TOKEN")
+	}
+
 	addr := proxyListen + ":" + strconv.Itoa(proxyPort)
 
-	srv := server.NewServer(proxyRegistry, proxyRepo, token, addr, proxyUpstream, proxyTTL)
+	srv := server.NewServer(registry, repo, token, addr, proxyUpstream, proxyTTL)
 	fmt.Printf(">>> Starting proxy on http://%s\n", addr)
-	fmt.Printf(">>> Target OCI repository: %s/%s\n", proxyRegistry, proxyRepo)
+	fmt.Printf(">>> Target OCI repository: %s/%s\n", registry, repo)
 	return srv.Start()
 }

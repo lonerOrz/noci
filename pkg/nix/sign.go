@@ -14,21 +14,24 @@ type Signer struct {
 	PrivateKey ed25519.PrivateKey
 }
 
-// NewSigner 加载 Nix 私钥签名器
+// NewSigner 从文件路径加载 Nix 私钥签名器
 func NewSigner(keyPath string) (*Signer, error) {
 	bytes, err := os.ReadFile(keyPath)
 	if err != nil {
 		return nil, err
 	}
-	content := strings.TrimSpace(string(bytes))
+	return NewSignerFromKey(string(bytes))
+}
+
+// NewSignerFromKey 直接从密钥文本内容加载私钥签名器（适合从环境变量加载）
+func NewSignerFromKey(content string) (*Signer, error) {
+	content = strings.TrimSpace(content)
 	parts := strings.Split(content, ":")
 
-	// 修复点 1：nix key generate-secret 生成的格式为 "名称:Base64密文"，Split 后长度应为 2
 	if len(parts) < 2 {
 		return nil, fmt.Errorf("invalid nix private key format")
 	}
 
-	// 修复点 2：密文应该在切片的索引 1 位置，而不是索引 2
 	rawKey, err := base64.StdEncoding.DecodeString(parts[1])
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode private key base64: %w", err)
