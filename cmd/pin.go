@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"context"
 	"fmt"
 	"noci/pkg/log"
 	"noci/pkg/nix"
@@ -36,7 +35,8 @@ func runPin(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("no paths or targets specified to pin")
 	}
 
-	ctx := context.Background()
+	ctx := cmd.Context()
+
 	cfg, err := pinFlags.Resolve()
 	if err != nil {
 		return err

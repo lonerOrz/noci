@@ -46,7 +46,6 @@ func (s *Server) handleNarInfo(w http.ResponseWriter, r *http.Request, hash stri
 			w.Header().Set("Content-Type", "text/x-nix-narinfo")
 			_, _ = w.Write([]byte(item.NarInfo))
 
-			// 非阻塞防抖：只有上次更新在 24 小时之前，才向通道抛送更新，极大地平抑 IO 写负载
 			if time.Since(item.LastUsed) > 24*time.Hour {
 				select {
 				case s.updateChan <- hash:
@@ -71,7 +70,6 @@ func (s *Server) handleNar(w http.ResponseWriter, r *http.Request, filename stri
 		if item, exists := idx.Entries[hash]; exists {
 			s.streamBlob(w, item.NarDigest)
 
-			// 物理文件拉取也支持并同步冷却更新
 			if time.Since(item.LastUsed) > 24*time.Hour {
 				select {
 				case s.updateChan <- hash:
@@ -120,11 +118,26 @@ func (s *Server) proxyToUpstream(w http.ResponseWriter, r *http.Request, path st
 	}
 	defer resp.Body.Close()
 
+	// RFC 7230: 严格过滤 Hop-by-hop 逐跳传输头部，防止下游协议违规混乱
 	for k, vv := range resp.Header {
+		if isHopByHopHeader(k) {
+			continue
+		}
 		for _, v := range vv {
 			w.Header().Add(k, v)
 		}
 	}
 	w.WriteHeader(resp.StatusCode)
 	_, _ = io.Copy(w, resp.Body)
+}
+
+func isHopByHopHeader(name string) bool {
+	return strings.EqualFold(name, "Connection") ||
+		strings.EqualFold(name, "Keep-Alive") ||
+		strings.EqualFold(name, "Proxy-Authenticate") ||
+		strings.EqualFold(name, "Proxy-Authorization") ||
+		strings.EqualFold(name, "TE") ||
+		strings.EqualFold(name, "Transfer-Encoding") ||
+		strings.EqualFold(name, "Trailers") ||
+		strings.EqualFold(name, "Upgrade")
 }

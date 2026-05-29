@@ -30,15 +30,33 @@ func NewServer(registry, repo, token, addr, upstream string, ttl int) *Server {
 	}
 }
 
-func (s *Server) Start() error {
+// Start 启动本地代理 HTTP 服务器
+func (s *Server) Start(ctx context.Context) error {
 	go s.RefreshIndex()
-	go s.startUpdateWorker()
+	go s.startUpdateWorker(ctx)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/nix-cache-info", s.HandleNixCacheInfo)
 	mux.HandleFunc("/", s.HandleRoutes)
 
-	return http.ListenAndServe(s.addr, mux)
+	srv := &http.Server{
+		Addr:    s.addr,
+		Handler: mux,
+	}
+
+	// 监听上下文关闭信号
+	go func() {
+		<-ctx.Done()
+		log.Info("Shutting down proxy server gracefully...")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(shutdownCtx)
+	}()
+
+	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
+		return err
+	}
+	return nil
 }
 
 func (s *Server) RefreshIndex() {
@@ -80,7 +98,8 @@ func (s *Server) GetIndex() *oci.CacheIndex {
 	return s.index
 }
 
-func (s *Server) startUpdateWorker() {
+// startUpdateWorker 增加 Context 检测，在 Proxy 退出前强制将缓存回写到 OCI
+func (s *Server) startUpdateWorker(ctx context.Context) {
 	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
 
@@ -88,6 +107,13 @@ func (s *Server) startUpdateWorker() {
 
 	for {
 		select {
+		case <-ctx.Done():
+			// 如果收到优雅退出信号，立即强行 Flush 回写所有积攒的时间戳
+			if len(pendingUpdates) > 0 {
+				log.Info("Flushing remaining LastUsed updates before shutdown...")
+				s.flushLastUsedUpdates(pendingUpdates)
+			}
+			return
 		case hash, ok := <-s.updateChan:
 			if !ok {
 				return
@@ -106,6 +132,7 @@ func (s *Server) startUpdateWorker() {
 	}
 }
 
+// flushLastUsedUpdates 在写锁保护下通过重新 Fetch 的乐观锁设计，防范 CI 端的 Lost Update 灾难
 func (s *Server) flushLastUsedUpdates(updates map[string]time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -113,6 +140,7 @@ func (s *Server) flushLastUsedUpdates(updates map[string]time.Time) {
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
 	defer cancel()
 
+	// 重新 Fetch 最新远端索引，进行单向的时间戳乐观合并
 	idx, err := s.client.FetchIndex(ctx)
 	if err != nil {
 		log.Warning("Failed to fetch index for LastUsed flush: %v", err)
@@ -132,6 +160,7 @@ func (s *Server) flushLastUsedUpdates(updates map[string]time.Time) {
 		return
 	}
 
+	// 推送回写
 	if err := s.client.PushIndex(ctx, idx); err == nil {
 		s.index = idx
 		s.lastIndexFetch = time.Now()

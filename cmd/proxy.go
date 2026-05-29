@@ -31,6 +31,8 @@ func init() {
 }
 
 func runProxy(cmd *cobra.Command, args []string) error {
+	ctx := cmd.Context()
+
 	cfg, err := proxyFlags.Resolve()
 	if err != nil {
 		return err
@@ -41,5 +43,5 @@ func runProxy(cmd *cobra.Command, args []string) error {
 
 	log.Action("Starting proxy on http://%s", addr)
 	log.Action("Target OCI repository: %s/%s", cfg.Registry, cfg.Repo)
-	return srv.Start()
+	return srv.Start(ctx)
 }

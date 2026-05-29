@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"bufio"
-	"context"
 	"fmt"
 	"noci/pkg/log"
 	"noci/pkg/nix"
@@ -33,7 +32,7 @@ func init() {
 }
 
 func runPush(cmd *cobra.Command, args []string) error {
-	ctx := context.Background()
+	ctx := cmd.Context()
 
 	cfg, err := pushFlags.Resolve()
 	if err != nil {

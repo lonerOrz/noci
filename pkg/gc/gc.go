@@ -27,9 +27,9 @@ type Result struct {
 	EvictedCount  int
 	EvictedSize   int64
 	EvictedKeys   []string
+	ExpiredRoots  []string // 👈 在计算阶段收集过期 roots，不在 Sweep 阶段原地修改 index 指针
 }
 
-// Sweep 在全内存中不产生网络请求地计算依赖关系拓扑
 func (e *Engine) Sweep(now time.Time, maxSize int64) *Result {
 	markedSet := make(map[string]bool)
 	var originalSize int64
@@ -37,17 +37,18 @@ func (e *Engine) Sweep(now time.Time, maxSize int64) *Result {
 		originalSize += entry.NarSize
 	}
 
-	// 1. 扫描并自动滤除过期 GC Roots
+	// 1. 扫描 GC Roots（仅打标收集，保证 Dry-Run 的只读纯粹性）
 	activeRoots := make([]string, 0)
+	expiredRoots := make([]string, 0)
 	for hash, root := range e.index.Roots {
 		if root.TTL > 0 && now.Unix() > root.PinnedAt.Unix()+root.TTL {
-			delete(e.index.Roots, hash) // 淘汰过期根
+			expiredRoots = append(expiredRoots, hash)
 			continue
 		}
 		activeRoots = append(activeRoots, hash)
 	}
 
-	// 2. 深度优先搜索（DFS）有向染色
+	// 2. DFS 染色
 	for _, rootHash := range activeRoots {
 		e.dfs(rootHash, markedSet)
 	}
@@ -62,7 +63,6 @@ func (e *Engine) Sweep(now time.Time, maxSize int64) *Result {
 			continue
 		}
 
-		// 若尚在安全宽限期（新上传的临时悬空依赖），强制拉回豁免保留
 		if now.Sub(entry.UploadedAt) < e.gracePeriod {
 			markedSet[hash] = true
 			retainedSize += entry.NarSize
@@ -72,7 +72,6 @@ func (e *Engine) Sweep(now time.Time, maxSize int64) *Result {
 		candidates = append(candidates, hash)
 	}
 
-	// 按最后拉取使用时间 LastUsed 从小到大排序（最冷的数据排在最前面）
 	sort.Slice(candidates, func(i, j int) bool {
 		return e.index.Entries[candidates[i]].LastUsed.Before(e.index.Entries[candidates[j]].LastUsed)
 	})
@@ -89,18 +88,15 @@ func (e *Engine) Sweep(now time.Time, maxSize int64) *Result {
 
 		for _, hash := range candidates {
 			if currentSize <= maxSize {
-				// 削减达标，保留剩余较热的候选包
 				retainedSize += e.index.Entries[hash].NarSize
 				markedSet[hash] = true
 				continue
 			}
-			// 否则，物理移除最冷包
 			evictedKeys = append(evictedKeys, hash)
 			evictedSize += e.index.Entries[hash].NarSize
 			currentSize -= e.index.Entries[hash].NarSize
 		}
 	} else {
-		// 未设定最大空间上限，代表直接清理全部未标记的悬空孤立包
 		evictedKeys = candidates
 		for _, hash := range candidates {
 			evictedSize += e.index.Entries[hash].NarSize
@@ -115,11 +111,15 @@ func (e *Engine) Sweep(now time.Time, maxSize int64) *Result {
 		EvictedCount:  len(evictedKeys),
 		EvictedSize:   evictedSize,
 		EvictedKeys:   evictedKeys,
+		ExpiredRoots:  expiredRoots,
 	}
 }
 
-// Apply 逻辑修改，更新内部结构映射
+// Apply 仅在此物理写入阶段，真正执行 Entries 与 Roots 擦除
 func (e *Engine) Apply(result *Result) {
+	for _, hash := range result.ExpiredRoots {
+		delete(e.index.Roots, hash)
+	}
 	for _, hash := range result.EvictedKeys {
 		delete(e.index.Entries, hash)
 	}

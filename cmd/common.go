@@ -16,6 +16,8 @@ type OCIConfig struct {
 	Token    string
 }
 
+var sizeRegex = regexp.MustCompile(`^(\d+)\s*(B|KB|MB|GB|TB)?$`)
+
 // CommonFlags 共享命令行参数绑定结构体，解耦子命令的变量污染
 type CommonFlags struct {
 	Repo     string
@@ -65,8 +67,7 @@ func parseSizeString(sizeStr string) (int64, error) {
 	if sizeStr == "" {
 		return 0, nil
 	}
-	re := regexp.MustCompile(`^(\d+)\s*(B|KB|MB|GB|TB)?$`)
-	matches := re.FindStringSubmatch(sizeStr)
+	matches := sizeRegex.FindStringSubmatch(sizeStr)
 	if len(matches) < 2 {
 		return 0, fmt.Errorf("invalid size format: %s", sizeStr)
 	}
