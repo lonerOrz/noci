@@ -21,7 +21,6 @@ func NewPublisher(client *oci.Client, signer *nix.Signer) *Publisher {
 	}
 }
 
-// Publish 封装了获取/创建索引、依赖闭包分析、上游缓存去重、流式压缩、上传和签名的完整事务
 func (p *Publisher) Publish(ctx context.Context, inputPaths []string) error {
 	// 1. 获取最新索引
 	index, err := p.client.FetchIndex(ctx)
@@ -51,7 +50,6 @@ func (p *Publisher) Publish(ctx context.Context, inputPaths []string) error {
 			return fmt.Errorf("failed to get path info for %s: %w", path, err)
 		}
 
-		// 通过密码学官方签名判断是否能跳过（无需网络开销）
 		hasUpstreamSig := false
 		for _, sig := range info.Signatures {
 			if strings.HasPrefix(sig, "cache.nixos.org-1:") {
@@ -84,21 +82,18 @@ func (p *Publisher) Publish(ctx context.Context, inputPaths []string) error {
 		err := func(info nix.PathInfo) error {
 			fmt.Printf(">>> Processing: %s\n", info.Path)
 
-			// 物理导出并压缩成临时归档
 			narFile, fileHash, fileSize, err := nix.ExportAndCompress(info.Path)
 			if err != nil {
 				return fmt.Errorf("failed to export %s: %w", info.Path, err)
 			}
 			defer os.Remove(narFile)
 
-			// 上传 Blob 归档到 OCI 存储
 			fmt.Printf("    Uploading compressed NAR blob (%d bytes)...\n", fileSize)
 			digest, err := p.client.UploadBlob(ctx, narFile, fileHash)
 			if err != nil {
 				return fmt.Errorf("failed to upload blob for %s: %w", info.Path, err)
 			}
 
-			// 进行签名生成
 			sigs := info.Signatures
 			if p.signer != nil {
 				sig, err := p.signer.SignPath(info.Path, info.NarHash, info.NarSize, info.References)
@@ -108,10 +103,11 @@ func (p *Publisher) Publish(ctx context.Context, inputPaths []string) error {
 				sigs = append(sigs, sig)
 			}
 
-			// 转换 .narinfo 元数据并合并写入本地索引
 			narinfoContent := nix.GenerateNarInfo(info.Path, info.NarHash, info.NarSize, fileHash, fileSize, info.References, sigs)
 			hash := nix.GetPathHash(info.Path)
-			index.AddEntry(hash, nix.GetPathName(info.Path), narinfoContent, digest, fileSize)
+
+			// 核心改动：在上传物理 NAR 包时同步注入解析出的 references，GC 时直接提取进行秒级依赖染色
+			index.AddEntry(hash, nix.GetPathName(info.Path), narinfoContent, digest, fileSize, info.References)
 			return nil
 		}(info)
 

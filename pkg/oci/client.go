@@ -25,7 +25,6 @@ type Client struct {
 
 func NewClient(registry, repo, token string) *Client {
 	return &Client{
-		// OCI 规范要求所有仓库和域名路径必须为全小写，在此进行强制转换规避 403 隐患
 		registry: strings.ToLower(registry),
 		repo:     strings.ToLower(repo),
 		token:    token,
@@ -98,20 +97,17 @@ func (c *Client) Request(ctx context.Context, method, path string, body io.Reade
 func (c *Client) UploadBlob(ctx context.Context, filePath, sha256Hex string) (string, error) {
 	digest := "sha256:" + sha256Hex
 
-	// 1. 验证 Blob 是否已存在 (免去重复上传)
 	headResp, err := c.Request(ctx, "HEAD", "/blobs/"+digest, nil, "")
 	if err == nil && headResp.StatusCode == http.StatusOK {
 		return digest, nil
 	}
 
-	// 2. 发起上传请求获取 Location
 	initResp, err := c.Request(ctx, "POST", "/blobs/uploads/", nil, "")
 	if err != nil {
 		return "", err
 	}
 	defer initResp.Body.Close()
 
-	// 检查 POST 状态码，如果是 401/403 会直接向用户报错并打印 GHCR 原始返回
 	if initResp.StatusCode != http.StatusAccepted && initResp.StatusCode != http.StatusCreated {
 		bodyBytes, _ := io.ReadAll(initResp.Body)
 		return "", fmt.Errorf("failed to initiate blob upload (HTTP %d): %s", initResp.StatusCode, string(bodyBytes))
@@ -122,25 +118,21 @@ func (c *Client) UploadBlob(ctx context.Context, filePath, sha256Hex string) (st
 		return "", fmt.Errorf("registry didn't return upload location")
 	}
 
-	// 解析 Location URL
 	u, err := url.Parse(uploadURL)
 	if err != nil {
 		return "", fmt.Errorf("invalid upload location URL: %w", err)
 	}
 
-	// 如果是相对路径（如 GHCR 返回的 /v2/...），以当前注册表域名为基准自动补全 Scheme 和 Host
 	if !u.IsAbs() {
 		base, _ := url.Parse(fmt.Sprintf("https://%s", c.registry))
 		u = base.ResolveReference(u)
 	}
 
-	// 使用标准库 url.Values 设置 Query 参数，由标准库自动健壮地处理 ? 和 & 的逻辑
 	q := u.Query()
 	q.Set("digest", digest)
 	u.RawQuery = q.Encode()
-	uploadURL = u.String() // 此时得到的 URL 结构绝对合法（包含正确的 ?digest=）
+	uploadURL = u.String()
 
-	// 3. 上传大文件
 	file, err := os.Open(filePath)
 	if err != nil {
 		return "", err
@@ -173,17 +165,29 @@ func (c *Client) UploadBlob(ctx context.Context, filePath, sha256Hex string) (st
 	return digest, nil
 }
 
-// FetchIndex 从 GHCR 获取最新的 cache-index JSON
+// DeleteBlob 显式擦除 OCI Registry 中的物理 Blob 数据
+func (c *Client) DeleteBlob(ctx context.Context, digest string) error {
+	resp, err := c.Request(ctx, "DELETE", "/blobs/"+digest, nil, "")
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted && resp.StatusCode != http.StatusNotFound {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("failed to delete blob %s (HTTP %d): %s", digest, resp.StatusCode, string(bodyBytes))
+	}
+	return nil
+}
+
 func (c *Client) FetchIndex(ctx context.Context) (*CacheIndex, error) {
 	token, err := c.getOciToken(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	// 获取 Manifest 清单
 	manifestURL := fmt.Sprintf("https://%s/v2/%s/nix-cache/manifests/cache-index", c.registry, c.repo)
 
-	// 核心修复：移除之前的冗余占位 request，并正确绑定 ctx 到本次实际请求上
 	req, err := http.NewRequestWithContext(ctx, "GET", manifestURL, nil)
 	if err != nil {
 		return nil, err
@@ -210,14 +214,12 @@ func (c *Client) FetchIndex(ctx context.Context) (*CacheIndex, error) {
 		return nil, fmt.Errorf("invalid manifest structure")
 	}
 
-	// 获取真实的 index 数据
 	blobResp, err := c.Request(ctx, "GET", "/blobs/"+manifest.Layers[0].Digest, nil, "")
 	if err != nil {
 		return nil, err
 	}
 	defer blobResp.Body.Close()
 
-	// 核心修复：严格校验底层 Blob 响应状态码，防止远端非 200 报文导致解析崩溃
 	if blobResp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("failed to get blob: HTTP %d", blobResp.StatusCode)
 	}
@@ -226,17 +228,19 @@ func (c *Client) FetchIndex(ctx context.Context) (*CacheIndex, error) {
 	if err := json.NewDecoder(blobResp.Body).Decode(&idx); err != nil {
 		return nil, err
 	}
+
+	// 加载成功后立即自适应执行 V2 升级，零感知平滑迁移历史缓存数据
+	idx.Upgrade()
+
 	return &idx, nil
 }
 
-// PushIndex 将更新后的索引和 OCI Manifest 上传回 GHCR
 func (c *Client) PushIndex(ctx context.Context, idx *CacheIndex) error {
 	data, err := json.MarshalIndent(idx, "", "  ")
 	if err != nil {
 		return err
 	}
 
-	// 保存为本地临时文件上传为 Blob
 	tmp, err := os.CreateTemp("", "noci-index-*.json")
 	if err != nil {
 		return err
@@ -256,7 +260,6 @@ func (c *Client) PushIndex(ctx context.Context, idx *CacheIndex) error {
 		return err
 	}
 
-	// 空配置 (OCI 规范必须)
 	configData := []byte("{}")
 	configHashWriter := sha256.New()
 	_, _ = configHashWriter.Write(configData)
@@ -272,7 +275,6 @@ func (c *Client) PushIndex(ctx context.Context, idx *CacheIndex) error {
 		return err
 	}
 
-	// 构造 Manifest 清单
 	manifest := map[string]interface{}{
 		"schemaVersion": 2,
 		"mediaType":     "application/vnd.oci.image.manifest.v1+json",

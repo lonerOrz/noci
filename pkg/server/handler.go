@@ -45,11 +45,18 @@ func (s *Server) handleNarInfo(w http.ResponseWriter, r *http.Request, hash stri
 		if item, exists := idx.Entries[hash]; exists {
 			w.Header().Set("Content-Type", "text/x-nix-narinfo")
 			_, _ = w.Write([]byte(item.NarInfo))
+
+			// 非阻塞防抖：只有上次更新在 24 小时之前，才向通道抛送更新，极大地平抑 IO 写负载
+			if time.Since(item.LastUsed) > 24*time.Hour {
+				select {
+				case s.updateChan <- hash:
+				default:
+				}
+			}
 			return
 		}
 	}
 
-	// 本地未命中，透明代理回上游官方源
 	s.proxyToUpstream(w, r, hash+".narinfo")
 }
 
@@ -63,11 +70,18 @@ func (s *Server) handleNar(w http.ResponseWriter, r *http.Request, filename stri
 	if idx != nil && hash != "" {
 		if item, exists := idx.Entries[hash]; exists {
 			s.streamBlob(w, item.NarDigest)
+
+			// 物理文件拉取也支持并同步冷却更新
+			if time.Since(item.LastUsed) > 24*time.Hour {
+				select {
+				case s.updateChan <- hash:
+				default:
+				}
+			}
 			return
 		}
 	}
 
-	// 本地未命中，透明代理回上游官方源
 	s.proxyToUpstream(w, r, "nar/"+filename)
 }
 
@@ -87,7 +101,6 @@ func (s *Server) streamBlob(w http.ResponseWriter, digest string) {
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", resp.ContentLength))
 	}
 
-	// 64 KB 零高位内存驻存极速流式回传
 	buf := make([]byte, 64*1024)
 	_, _ = io.CopyBuffer(w, resp.Body, buf)
 }
