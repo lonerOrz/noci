@@ -3,9 +3,7 @@ package cmd
 import (
 	"fmt"
 	"noci/pkg/log"
-	"noci/pkg/nix"
 	"noci/pkg/oci"
-	"strings"
 
 	"github.com/spf13/cobra"
 )
@@ -13,8 +11,8 @@ import (
 var unpinFlags CommonFlags
 
 var unpinCmd = &cobra.Command{
-	Use:   "unpin [paths or targets...]",
-	Short: "Unpin specific packages/targets in the OCI cache to allow them to be garbage collected",
+	Use:   "unpin [paths or 32-char hashes...]",
+	Short: "Unpin specific packages in the OCI cache to allow them to be garbage collected",
 	RunE:  runUnpin,
 }
 
@@ -25,7 +23,7 @@ func init() {
 
 func runUnpin(cmd *cobra.Command, args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("no paths or targets specified to unpin")
+		return fmt.Errorf("no paths or hashes specified to unpin")
 	}
 
 	ctx := cmd.Context()
@@ -34,26 +32,10 @@ func runUnpin(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	var inputPaths []string
-	for _, arg := range args {
-		arg = strings.TrimSpace(arg)
-		if arg == "" {
-			continue
-		}
-		if !strings.HasPrefix(arg, "/nix/store") {
-			log.Action("Target %q is not a store path. Evaluating output via `nix build`...", arg)
-			buildPaths, err := nix.BuildTarget(ctx, arg)
-			if err != nil {
-				return fmt.Errorf("failed to evaluate target %q: %w", arg, err)
-			}
-			inputPaths = append(inputPaths, buildPaths...)
-		} else {
-			inputPaths = append(inputPaths, arg)
-		}
-	}
-
-	if len(inputPaths) == 0 {
-		return fmt.Errorf("no valid store paths resolved to unpin")
+	// 统一利用 resolveHashes 解析（策略上强制禁止 unpin 触发本地构建，提升效率）
+	inputHashes, err := resolveHashes(ctx, args, false)
+	if err != nil {
+		return err
 	}
 
 	client := oci.NewClient(cfg.Registry, cfg.Repo, cfg.Token)
@@ -63,15 +45,14 @@ func runUnpin(cmd *cobra.Command, args []string) error {
 	}
 
 	modified := false
-	for _, path := range inputPaths {
-		hash := nix.GetPathHash(path)
+	for _, hash := range inputHashes {
 		if index.Roots != nil {
 			if _, exists := index.Roots[hash]; exists {
 				delete(index.Roots, hash)
-				log.Success("Successfully unpinned root: %s (hash: %s)", path, hash)
+				log.Success("Successfully unpinned root hash: %s", hash)
 				modified = true
 			} else {
-				log.Warning("Store path %s (hash: %s) was not pinned.", path, hash)
+				log.Warning("Hash %s was not pinned.", hash)
 			}
 		}
 	}

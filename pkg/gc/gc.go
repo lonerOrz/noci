@@ -48,10 +48,8 @@ func (e *Engine) Sweep(now time.Time, maxSize int64) *Result {
 		activeRoots = append(activeRoots, hash)
 	}
 
-	// 2. DFS 染色
-	for _, rootHash := range activeRoots {
-		e.dfs(rootHash, markedSet)
-	}
+	// 2. 迭代式工作队列染色
+	e.scanClosure(activeRoots, markedSet)
 
 	// 3. 安全宽限期（Grace Period）及临时未染色包分类
 	candidates := make([]string, 0)
@@ -115,7 +113,7 @@ func (e *Engine) Sweep(now time.Time, maxSize int64) *Result {
 	}
 }
 
-// Apply 仅在此物理写入阶段，真正执行 Entries 与 Roots 擦除
+// Apply 执行真正的 Entries 与 Roots 物理删除（仅在此物理写入阶段触发）
 func (e *Engine) Apply(result *Result) {
 	for _, hash := range result.ExpiredRoots {
 		delete(e.index.Roots, hash)
@@ -125,19 +123,31 @@ func (e *Engine) Apply(result *Result) {
 	}
 }
 
-func (e *Engine) dfs(hash string, markedSet map[string]bool) {
-	if markedSet[hash] {
-		return
-	}
-	entry, exists := e.index.Entries[hash]
-	if !exists {
-		return
-	}
-	markedSet[hash] = true
-	for _, ref := range entry.References {
-		refHash := getHashFromPath(ref)
-		if refHash != "" {
-			e.dfs(refHash, markedSet)
+// scanClosure 使用显式本地切片工作栈替代递归，杜绝深层拓扑引起的协程栈扩张与溢出
+func (e *Engine) scanClosure(activeRoots []string, markedSet map[string]bool) {
+	queue := append([]string{}, activeRoots...)
+
+	for len(queue) > 0 {
+		curr := queue[len(queue)-1]
+		queue = queue[:len(queue)-1] // Pop
+
+		if markedSet[curr] {
+			continue
+		}
+
+		entry, exists := e.index.Entries[curr]
+		if !exists {
+			continue
+		}
+
+		markedSet[curr] = true
+
+		// 将其依赖推入工作栈
+		for _, ref := range entry.References {
+			refHash := getHashFromPath(ref)
+			if refHash != "" && !markedSet[refHash] {
+				queue = append(queue, refHash)
+			}
 		}
 	}
 }

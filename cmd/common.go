@@ -1,7 +1,10 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
+	"noci/pkg/log"
+	"noci/pkg/nix"
 	"os"
 	"regexp"
 	"strconv"
@@ -18,7 +21,9 @@ type OCIConfig struct {
 
 var sizeRegex = regexp.MustCompile(`^(\d+)\s*(B|KB|MB|GB|TB)?$`)
 
-// CommonFlags 共享命令行参数绑定结构体，解耦子命令的变量污染
+// nixHashRegex 标准 Nix base32 哈希前缀规则检测（32位小写，滤除 e, o, t, u 字符）
+var nixHashRegex = regexp.MustCompile(`^[0-9abcdfghijklmnpqrsvwxyz]{32}$`)
+
 type CommonFlags struct {
 	Repo     string
 	Registry string
@@ -59,6 +64,50 @@ func (cf *CommonFlags) Resolve() (OCIConfig, error) {
 		Repo:     repo,
 		Token:    token,
 	}, nil
+}
+
+// resolveHashes 统一解析输入。原生兼容 32 位 Nix 纯哈希、Nix Store 绝对路径以及 Flake 构建目标。
+func resolveHashes(ctx context.Context, args []string, allowBuild bool) ([]string, error) {
+	var hashes []string
+	for _, arg := range args {
+		arg = strings.TrimSpace(arg)
+		if arg == "" {
+			continue
+		}
+
+		// 策略 A: 原生 32 位 Nix 哈希格式（最轻量，无本地 Nix 评估开销）
+		if nixHashRegex.MatchString(arg) {
+			hashes = append(hashes, arg)
+			continue
+		}
+
+		// 策略 B: Nix Store 绝对路径形式
+		if strings.HasPrefix(arg, "/nix/store") {
+			hash := nix.GetPathHash(arg)
+			if hash != "" {
+				hashes = append(hashes, hash)
+			}
+			continue
+		}
+
+		// 策略 C: 只有在 pin 等明确允许的情况下，才调用 `nix build`
+		if allowBuild {
+			log.Action("Target %q is not a local store path or raw hash. Evaluating via `nix build`...", arg)
+			buildPaths, err := nix.BuildTarget(ctx, arg)
+			if err != nil {
+				return nil, fmt.Errorf("failed to evaluate target %q: %w", arg, err)
+			}
+			for _, path := range buildPaths {
+				hash := nix.GetPathHash(path)
+				if hash != "" {
+					hashes = append(hashes, hash)
+				}
+			}
+		} else {
+			return nil, fmt.Errorf("target %q is not a valid 32-character Nix hash or store path (building is disabled for this command)", arg)
+		}
+	}
+	return hashes, nil
 }
 
 // parseSizeString 解析人类易读的大小限制字符串为字节数

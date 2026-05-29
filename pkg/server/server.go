@@ -33,7 +33,14 @@ func NewServer(registry, repo, token, addr, upstream string, ttl int) *Server {
 // Start 启动本地代理 HTTP 服务器
 func (s *Server) Start(ctx context.Context) error {
 	go s.RefreshIndex()
-	go s.startUpdateWorker(ctx)
+
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		s.startUpdateWorker(ctx)
+	}()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/nix-cache-info", s.HandleNixCacheInfo)
@@ -44,10 +51,10 @@ func (s *Server) Start(ctx context.Context) error {
 		Handler: mux,
 	}
 
-	// 监听上下文关闭信号
+	// 优雅关闭监听器
 	go func() {
 		<-ctx.Done()
-		log.Info("Shutting down proxy server gracefully...")
+		log.Info("Shutting down HTTP listeners gracefully...")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(shutdownCtx)
@@ -56,6 +63,10 @@ func (s *Server) Start(ctx context.Context) error {
 	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
 		return err
 	}
+
+	log.Info("Waiting for pending background workers to flush...")
+	wg.Wait()
+	log.Success("All entries flushed. Proxy stopped safely.")
 	return nil
 }
 
@@ -108,7 +119,7 @@ func (s *Server) startUpdateWorker(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			// 如果收到优雅退出信号，立即强行 Flush 回写所有积攒的时间戳
+			// 当上下文取消时，确保剩余积攒的 LastUsed 数据全部安全写回 OCI
 			if len(pendingUpdates) > 0 {
 				log.Info("Flushing remaining LastUsed updates before shutdown...")
 				s.flushLastUsedUpdates(pendingUpdates)
@@ -132,7 +143,6 @@ func (s *Server) startUpdateWorker(ctx context.Context) {
 	}
 }
 
-// flushLastUsedUpdates 在写锁保护下通过重新 Fetch 的乐观锁设计，防范 CI 端的 Lost Update 灾难
 func (s *Server) flushLastUsedUpdates(updates map[string]time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -140,7 +150,6 @@ func (s *Server) flushLastUsedUpdates(updates map[string]time.Time) {
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
 	defer cancel()
 
-	// 重新 Fetch 最新远端索引，进行单向的时间戳乐观合并
 	idx, err := s.client.FetchIndex(ctx)
 	if err != nil {
 		log.Warning("Failed to fetch index for LastUsed flush: %v", err)
