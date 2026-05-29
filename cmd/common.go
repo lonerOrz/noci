@@ -6,6 +6,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/spf13/cobra"
 )
 
 type OCIConfig struct {
@@ -14,9 +16,19 @@ type OCIConfig struct {
 	Token    string
 }
 
-// resolveOCIConfig 解析 OCI 基础参数，提供一致的环境变量后备支持
-func resolveOCIConfig(flagRegistry, flagRepo string) (OCIConfig, error) {
-	registry := flagRegistry
+// CommonFlags 共享命令行参数绑定结构体，解耦子命令的变量污染
+type CommonFlags struct {
+	Repo     string
+	Registry string
+}
+
+func (cf *CommonFlags) Register(cmd *cobra.Command) {
+	cmd.Flags().StringVar(&cf.Repo, "repo", "", "OCI repository (e.g. username/repo)")
+	cmd.Flags().StringVar(&cf.Registry, "registry", "ghcr.io", "OCI registry endpoint")
+}
+
+func (cf *CommonFlags) Resolve() (OCIConfig, error) {
+	registry := cf.Registry
 	if registry == "" {
 		registry = os.Getenv("NOCI_REGISTRY")
 	}
@@ -24,7 +36,7 @@ func resolveOCIConfig(flagRegistry, flagRepo string) (OCIConfig, error) {
 		registry = "ghcr.io"
 	}
 
-	repo := flagRepo
+	repo := cf.Repo
 	if repo == "" {
 		repo = os.Getenv("NOCI_REPO")
 	}
@@ -47,7 +59,7 @@ func resolveOCIConfig(flagRegistry, flagRepo string) (OCIConfig, error) {
 	}, nil
 }
 
-// parseSizeString 解析人类易读的大小限制字符串（如 "500MB", "10GB"）为字节数
+// parseSizeString 解析人类易读的大小限制字符串为字节数
 func parseSizeString(sizeStr string) (int64, error) {
 	sizeStr = strings.ToUpper(strings.TrimSpace(sizeStr))
 	if sizeStr == "" {

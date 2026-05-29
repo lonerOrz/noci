@@ -3,6 +3,7 @@ package publisher
 import (
 	"context"
 	"fmt"
+	"noci/pkg/log"
 	"noci/pkg/nix"
 	"noci/pkg/oci"
 	"os"
@@ -22,16 +23,14 @@ func NewPublisher(client *oci.Client, signer *nix.Signer) *Publisher {
 }
 
 func (p *Publisher) Publish(ctx context.Context, inputPaths []string) error {
-	// 1. 获取最新索引
 	index, err := p.client.FetchIndex(ctx)
 	if err != nil {
-		fmt.Printf(">>> No existing index found. Starting fresh.\n")
+		log.Warning("No existing index found. Starting fresh.")
 		index = oci.NewIndex(p.client.Registry(), p.client.Repo())
 	}
 
-	// 2. 闭包分析与过滤
-	fmt.Printf(">>> Evaluating closure for %d input path(s)...\n", len(inputPaths))
-	closure, err := nix.GetClosure(inputPaths)
+	log.Action("Evaluating closure for %d input path(s)...", len(inputPaths))
+	closure, err := nix.GetClosure(ctx, inputPaths)
 	if err != nil {
 		return fmt.Errorf("failed to get closure: %w", err)
 	}
@@ -45,7 +44,7 @@ func (p *Publisher) Publish(ctx context.Context, inputPaths []string) error {
 			continue
 		}
 
-		info, err := nix.GetPathInfo(path)
+		info, err := nix.GetPathInfo(ctx, path)
 		if err != nil {
 			return fmt.Errorf("failed to get path info for %s: %w", path, err)
 		}
@@ -67,28 +66,27 @@ func (p *Publisher) Publish(ctx context.Context, inputPaths []string) error {
 	}
 
 	if skippedUpstreamCount > 0 {
-		fmt.Printf(">>> Skipped %d path(s) that are already cached on upstream (cache.nixos.org).\n", skippedUpstreamCount)
+		log.Success("Skipped %d path(s) that are already cached on upstream (cache.nixos.org).", skippedUpstreamCount)
 	}
 
 	if len(uploadList) == 0 {
-		fmt.Printf(">>> Everything is already cached (either in OCI or upstream)!\n")
+		log.Success("Everything is already cached (either in OCI or upstream)!")
 		return nil
 	}
 
-	fmt.Printf(">>> Found %d new store path(s) to cache.\n", len(uploadList))
+	log.Info("Found %d new store path(s) to cache.", len(uploadList))
 
-	// 3. 执行物理上传
 	for _, info := range uploadList {
 		err := func(info nix.PathInfo) error {
-			fmt.Printf(">>> Processing: %s\n", info.Path)
+			log.Action("Processing: %s", info.Path)
 
-			narFile, fileHash, fileSize, err := nix.ExportAndCompress(info.Path)
+			narFile, fileHash, fileSize, err := nix.ExportAndCompress(ctx, info.Path)
 			if err != nil {
 				return fmt.Errorf("failed to export %s: %w", info.Path, err)
 			}
 			defer os.Remove(narFile)
 
-			fmt.Printf("    Uploading compressed NAR blob (%d bytes)...\n", fileSize)
+			log.Action("Uploading compressed NAR blob (%d bytes)...", fileSize)
 			digest, err := p.client.UploadBlob(ctx, narFile, fileHash)
 			if err != nil {
 				return fmt.Errorf("failed to upload blob for %s: %w", info.Path, err)
@@ -106,7 +104,6 @@ func (p *Publisher) Publish(ctx context.Context, inputPaths []string) error {
 			narinfoContent := nix.GenerateNarInfo(info.Path, info.NarHash, info.NarSize, fileHash, fileSize, info.References, sigs)
 			hash := nix.GetPathHash(info.Path)
 
-			// 核心改动：在上传物理 NAR 包时同步注入解析出的 references，GC 时直接提取进行秒级依赖染色
 			index.AddEntry(hash, nix.GetPathName(info.Path), narinfoContent, digest, fileSize, info.References)
 			return nil
 		}(info)
@@ -116,12 +113,11 @@ func (p *Publisher) Publish(ctx context.Context, inputPaths []string) error {
 		}
 	}
 
-	// 4. 保存提交索引
-	fmt.Printf(">>> Updating remote cache-index...\n")
+	log.Action("Updating remote cache-index...")
 	if err := p.client.PushIndex(ctx, index); err != nil {
 		return fmt.Errorf("failed to push updated index: %w", err)
 	}
 
-	fmt.Printf(">>> Success! Cached %d packages.\n", len(uploadList))
+	log.Success("Cached %d packages successfully.", len(uploadList))
 	return nil
 }

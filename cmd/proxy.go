@@ -1,7 +1,7 @@
 package cmd
 
 import (
-	"fmt"
+	"noci/pkg/log"
 	"noci/pkg/server"
 	"strconv"
 
@@ -9,8 +9,7 @@ import (
 )
 
 var (
-	proxyRepo     string
-	proxyRegistry string
+	proxyFlags    CommonFlags
 	proxyPort     int
 	proxyListen   string
 	proxyUpstream string
@@ -24,8 +23,7 @@ var proxyCmd = &cobra.Command{
 }
 
 func init() {
-	proxyCmd.Flags().StringVar(&proxyRepo, "repo", "", "OCI repository (e.g. username/repo)")
-	proxyCmd.Flags().StringVar(&proxyRegistry, "registry", "ghcr.io", "OCI registry endpoint")
+	proxyFlags.Register(proxyCmd)
 	proxyCmd.Flags().IntVar(&proxyPort, "port", 37515, "Port to listen on")
 	proxyCmd.Flags().StringVar(&proxyListen, "listen", "127.0.0.1", "Listen address")
 	proxyCmd.Flags().StringVar(&proxyUpstream, "upstream", "https://cache.nixos.org", "Fallback upstream cache")
@@ -33,7 +31,7 @@ func init() {
 }
 
 func runProxy(cmd *cobra.Command, args []string) error {
-	cfg, err := resolveOCIConfig(proxyRegistry, proxyRepo)
+	cfg, err := proxyFlags.Resolve()
 	if err != nil {
 		return err
 	}
@@ -41,7 +39,7 @@ func runProxy(cmd *cobra.Command, args []string) error {
 	addr := proxyListen + ":" + strconv.Itoa(proxyPort)
 	srv := server.NewServer(cfg.Registry, cfg.Repo, cfg.Token, addr, proxyUpstream, proxyTTL)
 
-	fmt.Printf(">>> Starting proxy on http://%s\n", addr)
-	fmt.Printf(">>> Target OCI repository: %s/%s\n", cfg.Registry, cfg.Repo)
+	log.Action("Starting proxy on http://%s", addr)
+	log.Action("Target OCI repository: %s/%s", cfg.Registry, cfg.Repo)
 	return srv.Start()
 }

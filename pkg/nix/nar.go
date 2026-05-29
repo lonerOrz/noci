@@ -2,6 +2,7 @@ package nix
 
 import (
 	"compress/gzip"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -12,9 +13,8 @@ import (
 	"strings"
 )
 
-// ExportAndCompress 流式将 nix-store 导出并采用 Gzip 进行高效压缩
-func ExportAndCompress(storePath string) (tempFile string, fileHash string, fileSize int64, err error) {
-	// 创建临时文件来临时保存压缩归档
+// ExportAndCompress 流式将 nix-store 导出并采用 Gzip 进行高效压缩 (Context-Aware)
+func ExportAndCompress(ctx context.Context, storePath string) (tempFile string, fileHash string, fileSize int64, err error) {
 	tmp, err := os.CreateTemp("", "noci-nar-*.nar.gz")
 	if err != nil {
 		return "", "", 0, err
@@ -22,13 +22,12 @@ func ExportAndCompress(storePath string) (tempFile string, fileHash string, file
 	defer tmp.Close()
 
 	hashWriter := sha256.New()
-	// 复合写入器：同时计算 SHA256 并写入磁盘
 	multiWriter := io.MultiWriter(tmp, hashWriter)
 
 	gzipWriter := gzip.NewWriter(multiWriter)
 
-	// 启动 nix-store --dump 进程
-	dumpCmd := exec.Command("nix-store", "--dump", storePath)
+	// 使用 CommandContext 启动，保障超时或中断时无进程泄漏
+	dumpCmd := exec.CommandContext(ctx, "nix-store", "--dump", storePath)
 	dumpCmd.Stdout = gzipWriter
 
 	if err := dumpCmd.Run(); err != nil {
@@ -47,7 +46,6 @@ func ExportAndCompress(storePath string) (tempFile string, fileHash string, file
 	return tmp.Name(), hex.EncodeToString(hashWriter.Sum(nil)), stat.Size(), nil
 }
 
-// GenerateNarInfo 组装标准的 .narinfo 元数据文本
 func GenerateNarInfo(storePath, narHash string, narSize int64, fileHash string, fileSize int64, refs []string, sigs []string) string {
 	var refBasenames []string
 	for _, r := range refs {

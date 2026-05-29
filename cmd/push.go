@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"noci/pkg/log"
 	"noci/pkg/nix"
 	"noci/pkg/oci"
 	"noci/pkg/publisher"
@@ -14,8 +15,7 @@ import (
 )
 
 var (
-	pushRepo      string
-	pushRegistry  string
+	pushFlags     CommonFlags
 	pushKeyFile   string
 	pushConfigDir string
 )
@@ -27,8 +27,7 @@ var pushCmd = &cobra.Command{
 }
 
 func init() {
-	pushCmd.Flags().StringVar(&pushRepo, "repo", "", "OCI repository (e.g. username/repo)")
-	pushCmd.Flags().StringVar(&pushRegistry, "registry", "ghcr.io", "OCI registry endpoint")
+	pushFlags.Register(pushCmd)
 	pushCmd.Flags().StringVar(&pushKeyFile, "key-file", "", "Nix private signing key file (optional)")
 	pushCmd.Flags().StringVar(&pushConfigDir, "config-dir", "config", "Path to Nix flake directory")
 }
@@ -36,13 +35,11 @@ func init() {
 func runPush(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
 
-	// 1. 解析配置
-	cfg, err := resolveOCIConfig(pushRegistry, pushRepo)
+	cfg, err := pushFlags.Resolve()
 	if err != nil {
 		return err
 	}
 
-	// 2. 初始化并校验签名密钥 (Mandatory Check)
 	var signer *nix.Signer
 	signingKey := os.Getenv("NOCI_SIGNING_KEY")
 	keyFile := pushKeyFile
@@ -70,7 +67,6 @@ func runPush(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// 3. 收集输入路径或直接编译目标
 	var inputPaths []string
 	for _, arg := range args {
 		arg = strings.TrimSpace(arg)
@@ -79,8 +75,8 @@ func runPush(cmd *cobra.Command, args []string) error {
 		}
 
 		if !strings.HasPrefix(arg, "/nix/store") {
-			fmt.Printf(">>> Target %q does not look like a store path. Running `nix build %s --no-link --json`...\n", arg, arg)
-			buildPaths, err := nix.BuildTarget(arg)
+			log.Action("Target %q does not look like a store path. Running `nix build %s --no-link --json`...", arg, arg)
+			buildPaths, err := nix.BuildTarget(ctx, arg)
 			if err != nil {
 				return fmt.Errorf("failed to build target %q: %w", arg, err)
 			}
@@ -90,7 +86,6 @@ func runPush(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Stdin 备用输入
 	if len(inputPaths) == 0 {
 		scanner := bufio.NewScanner(os.Stdin)
 		for scanner.Scan() {
@@ -112,7 +107,6 @@ func runPush(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("no paths or targets provided via arguments or stdin")
 	}
 
-	// 4. 初始化业务客户端与发布器，执行闭包上传工作流
 	client := oci.NewClient(cfg.Registry, cfg.Repo, cfg.Token)
 	pub := publisher.NewPublisher(client, signer)
 

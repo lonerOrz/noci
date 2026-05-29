@@ -2,8 +2,8 @@ package server
 
 import (
 	"context"
-	"fmt"
 	"net/http"
+	"noci/pkg/log"
 	"noci/pkg/oci"
 	"sync"
 	"time"
@@ -17,7 +17,7 @@ type Server struct {
 	index          *oci.CacheIndex
 	lastIndexFetch time.Time
 	mu             sync.RWMutex
-	updateChan     chan string // 异步延迟聚合 LastUsed 通道
+	updateChan     chan string
 }
 
 func NewServer(registry, repo, token, addr, upstream string, ttl int) *Server {
@@ -26,13 +26,13 @@ func NewServer(registry, repo, token, addr, upstream string, ttl int) *Server {
 		upstream:   upstream,
 		ttl:        ttl,
 		client:     oci.NewClient(registry, repo, token),
-		updateChan: make(chan string, 1000), // 1000 高吞吐缓冲区
+		updateChan: make(chan string, 1000),
 	}
 }
 
 func (s *Server) Start() error {
 	go s.RefreshIndex()
-	go s.startUpdateWorker() // 后台高吞吐异步聚合批处理器
+	go s.startUpdateWorker()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/nix-cache-info", s.HandleNixCacheInfo)
@@ -55,9 +55,9 @@ func (s *Server) refreshIndexLocked() {
 	if err == nil {
 		s.index = idx
 		s.lastIndexFetch = time.Now()
-		fmt.Printf("[noci-proxy] Cache-index refreshed. Loaded %d entries.\n", len(idx.Entries))
+		log.Success("Cache-index refreshed. Loaded %d entries.", len(idx.Entries))
 	} else {
-		fmt.Printf("[noci-proxy] Failed to refresh cache-index: %v\n", err)
+		log.Warning("Failed to refresh cache-index: %v", err)
 	}
 }
 
@@ -80,7 +80,6 @@ func (s *Server) GetIndex() *oci.CacheIndex {
 	return s.index
 }
 
-// startUpdateWorker 后台聚合器：每5分钟（或每积攒100个活跃信号）触发一次批量乐观更新
 func (s *Server) startUpdateWorker() {
 	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
@@ -114,10 +113,9 @@ func (s *Server) flushLastUsedUpdates(updates map[string]time.Time) {
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
 	defer cancel()
 
-	// 实时拉取最新索引以进行防冲突 CAS 状态合并
 	idx, err := s.client.FetchIndex(ctx)
 	if err != nil {
-		fmt.Printf("[noci-proxy] Failed to fetch index for LastUsed flush: %v\n", err)
+		log.Warning("Failed to fetch index for LastUsed flush: %v", err)
 		return
 	}
 
@@ -137,8 +135,8 @@ func (s *Server) flushLastUsedUpdates(updates map[string]time.Time) {
 	if err := s.client.PushIndex(ctx, idx); err == nil {
 		s.index = idx
 		s.lastIndexFetch = time.Now()
-		fmt.Printf("[noci-proxy] Successfully flushed %d LastUsed updates to OCI.\n", len(updates))
+		log.Success("Successfully flushed %d LastUsed updates to OCI.", len(updates))
 	} else {
-		fmt.Printf("[noci-proxy] Failed to flush LastUsed updates to OCI: %v\n", err)
+		log.Warning("Failed to flush LastUsed updates to OCI: %v", err)
 	}
 }
