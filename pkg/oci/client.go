@@ -12,15 +12,18 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 )
 
 type Client struct {
-	registry string
-	repo     string
-	token    string
-	ociToken string
-	client   *http.Client
+	registry       string
+	repo           string
+	token          string
+	tokenMu        sync.Mutex
+	ociToken       string
+	tokenFetchTime time.Time
+	client         *http.Client
 }
 
 func NewClient(registry, repo, token string) *Client {
@@ -32,9 +35,11 @@ func NewClient(registry, repo, token string) *Client {
 	}
 }
 
-// getOciToken 使用 GitHub Token 换取 OCI 的 Scoped 临时 Token
 func (c *Client) getOciToken(ctx context.Context) (string, error) {
-	if c.ociToken != "" {
+	c.tokenMu.Lock()
+	defer c.tokenMu.Unlock()
+
+	if c.ociToken != "" && time.Since(c.tokenFetchTime) < 50*time.Minute {
 		return c.ociToken, nil
 	}
 
@@ -69,10 +74,10 @@ func (c *Client) getOciToken(ctx context.Context) (string, error) {
 	}
 
 	c.ociToken = res.Token
+	c.tokenFetchTime = time.Now()
 	return c.ociToken, nil
 }
 
-// Request 发送带 Bearer Token 头的标准 OCI HTTP 请求
 func (c *Client) Request(ctx context.Context, method, path string, body io.Reader, contentType string) (*http.Response, error) {
 	token, err := c.getOciToken(ctx)
 	if err != nil {
@@ -93,7 +98,6 @@ func (c *Client) Request(ctx context.Context, method, path string, body io.Reade
 	return c.client.Do(req)
 }
 
-// UploadBlob 推送本地临时文件作为 OCI Blob，返回其 SHA256 摘要
 func (c *Client) UploadBlob(ctx context.Context, filePath, sha256Hex string) (string, error) {
 	digest := "sha256:" + sha256Hex
 
@@ -165,7 +169,6 @@ func (c *Client) UploadBlob(ctx context.Context, filePath, sha256Hex string) (st
 	return digest, nil
 }
 
-// DeleteBlob 显式擦除 OCI Registry 中的物理 Blob 数据
 func (c *Client) DeleteBlob(ctx context.Context, digest string) error {
 	resp, err := c.Request(ctx, "DELETE", "/blobs/"+digest, nil, "")
 	if err != nil {
@@ -229,7 +232,6 @@ func (c *Client) FetchIndex(ctx context.Context) (*CacheIndex, error) {
 		return nil, err
 	}
 
-	// 加载成功后立即自适应执行 V2 升级，零感知平滑迁移历史缓存数据
 	idx.Upgrade()
 
 	return &idx, nil

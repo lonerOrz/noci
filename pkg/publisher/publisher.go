@@ -31,7 +31,6 @@ func (p *Publisher) Publish(ctx context.Context, inputPaths []string) error {
 		index = oci.NewIndex(p.client.Registry(), p.client.Repo())
 	}
 
-	// Nix 客户端通过此公钥校验 Sig 字段中的签名，没有它则无法在 require-sigs=true 模式下工作
 	if p.signer != nil {
 		pubKey := p.signer.PrivateKey.Public().(ed25519.PublicKey)
 		index.PublicKey = fmt.Sprintf("%s:%s",
@@ -40,7 +39,6 @@ func (p *Publisher) Publish(ctx context.Context, inputPaths []string) error {
 		)
 	}
 
-	// 闭包分析与过滤
 	log.Action("Evaluating closure for %d input path(s)...", len(inputPaths))
 	closure, err := nix.GetClosure(ctx, inputPaths)
 	if err != nil {
@@ -105,19 +103,23 @@ func (p *Publisher) Publish(ctx context.Context, inputPaths []string) error {
 				return fmt.Errorf("failed to upload blob for %s: %w", info.Path, err)
 			}
 
+			normalizedNarHash, err := nix.NormalizeNarHash(info.NarHash)
+			if err != nil {
+				return fmt.Errorf("failed to normalize NarHash for %s: %w", info.Path, err)
+			}
+
 			sigs := info.Signatures
 			if p.signer != nil {
-				sig, err := p.signer.SignPath(info.Path, info.NarHash, info.NarSize, info.References)
+				sig, err := p.signer.SignPath(info.Path, normalizedNarHash, info.NarSize, info.References)
 				if err != nil {
 					return fmt.Errorf("failed to sign path: %w", err)
 				}
 				sigs = append(sigs, sig)
 			}
 
-			narinfoContent := nix.GenerateNarInfo(info.Path, info.NarHash, info.NarSize, fileHash, fileSize, info.References, sigs)
+			narinfoContent := nix.GenerateNarInfo(info.Path, normalizedNarHash, info.NarSize, fileHash, fileSize, info.References, sigs)
 			hash := nix.GetPathHash(info.Path)
 
-			// 在上传物理 NAR 包时同步注入解析出的 references，GC 时直接提取进行秒级依赖染色
 			index.AddEntry(hash, nix.GetPathName(info.Path), narinfoContent, digest, fileSize, info.References)
 			return nil
 		}(info)
@@ -127,7 +129,6 @@ func (p *Publisher) Publish(ctx context.Context, inputPaths []string) error {
 		}
 	}
 
-	// 保存提交索引
 	log.Action("Updating remote cache-index...")
 	if err := p.client.PushIndex(ctx, index); err != nil {
 		return fmt.Errorf("failed to push updated index: %w", err)
