@@ -17,10 +17,11 @@ buildGoModule {
   ];
   doCheck = false;
 
-  meta = with lib; {
-    description = "A highly modular Nix binary cache over OCI registry";
+  meta = {
+    description = "Highly modular Nix binary cache over OCI registry";
     homepage = "https://github.com/lonerOrz/noci";
-    license = licenses.mit;
+    license = lib.licenses.bsd3;
+    maintainers = with lib.maintainers; [ lonerOrz ];
     mainProgram = "noci";
   };
 }
