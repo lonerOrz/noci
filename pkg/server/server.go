@@ -3,6 +3,8 @@ package server
 import (
 	"context"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"noci/pkg/log"
 	"noci/pkg/oci"
 	"sync"
@@ -10,24 +12,39 @@ import (
 )
 
 type Server struct {
-	addr           string
-	upstream       string
-	ttl            int
-	client         *oci.Client
-	index          *oci.CacheIndex
+	addr          string
+	upstream      string
+	ttl           int
+	client        *oci.Client
+	index         *oci.CacheIndex
 	lastIndexFetch time.Time
-	mu             sync.RWMutex
-	fetchMu        sync.Mutex
-	updateChan     chan string
+	mu            sync.RWMutex
+	fetchMu       sync.Mutex
+	updateChan    chan string
+	upstreamProxy *httputil.ReverseProxy
 }
 
 func NewServer(registry, repo, token, addr, upstream string, ttl int) *Server {
+	targetURL, err := url.Parse(upstream)
+	var proxy *httputil.ReverseProxy
+	if err == nil {
+		proxy = httputil.NewSingleHostReverseProxy(targetURL)
+		originalDirector := proxy.Director
+		proxy.Director = func(req *http.Request) {
+			originalDirector(req)
+			req.Host = targetURL.Host
+		}
+	} else {
+		log.Warning("Failed to parse upstream URL for ReverseProxy optimization: %v", err)
+	}
+
 	return &Server{
-		addr:       addr,
-		upstream:   upstream,
-		ttl:        ttl,
-		client:     oci.NewClient(registry, repo, token),
-		updateChan: make(chan string, 1000),
+		addr:          addr,
+		upstream:      upstream,
+		ttl:           ttl,
+		client:        oci.NewClient(registry, repo, token),
+		updateChan:    make(chan string, 1000),
+		upstreamProxy: proxy,
 	}
 }
 
@@ -131,7 +148,7 @@ func (s *Server) GetIndex() *oci.CacheIndex {
 }
 
 func (s *Server) startUpdateWorker(ctx context.Context) {
-	ticker := time.NewTicker(15 * time.Minute) // 🌟 从 5m 延长到 15m，显著降低 OCI 更新载荷
+	ticker := time.NewTicker(15 * time.Minute)
 	defer ticker.Stop()
 
 	pendingUpdates := make(map[string]time.Time)

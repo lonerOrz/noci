@@ -6,8 +6,15 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
+
+var bufferPool = sync.Pool{
+	New: func() interface{} {
+		return make([]byte, 32*1024)
+	},
+}
 
 func (s *Server) HandleNixCacheInfo(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/x-nix-cache-info")
@@ -99,11 +106,19 @@ func (s *Server) streamBlob(w http.ResponseWriter, digest string) {
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", resp.ContentLength))
 	}
 
-	buf := make([]byte, 64*1024)
+	buf := bufferPool.Get().([]byte)
+	defer bufferPool.Put(buf)
+
 	_, _ = io.CopyBuffer(w, resp.Body, buf)
 }
 
 func (s *Server) proxyToUpstream(w http.ResponseWriter, r *http.Request, path string) {
+	if s.upstreamProxy != nil {
+		r.URL.Path = "/" + path
+		s.upstreamProxy.ServeHTTP(w, r)
+		return
+	}
+
 	upstreamURL := s.upstream + "/" + path
 	req, err := http.NewRequestWithContext(r.Context(), "GET", upstreamURL, nil)
 	if err != nil {
@@ -118,7 +133,6 @@ func (s *Server) proxyToUpstream(w http.ResponseWriter, r *http.Request, path st
 	}
 	defer resp.Body.Close()
 
-	// RFC 7230: 严格过滤 Hop-by-hop 逐跳传输头部，防止下游协议违规混乱
 	for k, vv := range resp.Header {
 		if isHopByHopHeader(k) {
 			continue

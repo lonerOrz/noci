@@ -1,6 +1,7 @@
 package nix
 
 import (
+	"bufio"
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
@@ -21,12 +22,13 @@ func ExportAndCompress(ctx context.Context, storePath string) (tempFile string, 
 	}
 	defer tmp.Close()
 
+	bufWriter := bufio.NewWriterSize(tmp, 256*1024)
+
 	hashWriter := sha256.New()
-	multiWriter := io.MultiWriter(tmp, hashWriter)
+	multiWriter := io.MultiWriter(bufWriter, hashWriter)
 
 	gzipWriter := gzip.NewWriter(multiWriter)
 
-	// 使用 CommandContext 启动，保障超时或中断时无进程泄漏
 	dumpCmd := exec.CommandContext(ctx, "nix-store", "--dump", storePath)
 	dumpCmd.Stdout = gzipWriter
 
@@ -36,6 +38,7 @@ func ExportAndCompress(ctx context.Context, storePath string) (tempFile string, 
 	}
 
 	_ = gzipWriter.Close()
+	_ = bufWriter.Flush()
 
 	stat, err := tmp.Stat()
 	if err != nil {
