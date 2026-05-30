@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -83,13 +85,15 @@ func GetPathInfo(ctx context.Context, storePath string) (*PathInfo, error) {
 	return nil, fmt.Errorf("failed to parse nix path-info output: %s", out.String())
 }
 
-// BuildTarget 执行本地 `nix build` 命令获取其 JSON 形式的输出路径 (Context-Aware)
+// BuildTarget 执行本地 `nix build`
 func BuildTarget(ctx context.Context, target string) ([]string, error) {
-	cmd := exec.CommandContext(ctx, "nix", "build", target, "--no-link", "--json")
+	cmd := exec.CommandContext(ctx, "nix", "build", target, "-L", "--no-link", "--json")
 	var out bytes.Buffer
 	var errOut bytes.Buffer
+
 	cmd.Stdout = &out
-	cmd.Stderr = &errOut
+	cmd.Stderr = io.MultiWriter(os.Stderr, &errOut)
+
 	if err := cmd.Run(); err != nil {
 		return nil, fmt.Errorf("%v: %s", err, errOut.String())
 	}
