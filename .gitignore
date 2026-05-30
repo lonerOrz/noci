@@ -1,0 +1,41 @@
+# Nix build 产生的软链接
+.envrc
+.direnv/
+result
+result-*
+
+# 编译生成的二进制文件
+/noci
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# 测试与性能分析文件
+*.test
+*.out
+coverage.txt
+profile.out
+
+# Go 工作区文件
+go.work
+go.work.sum
+
+# Vendor 目录
+vendor/
+
+# 临时文件与日志
+tmp/
+temp/
+*.log
+noci-nar-*.nar.gz
+noci-index-*.json
+noci-config-*.json
+
+# OS & IDE 忽略项
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
