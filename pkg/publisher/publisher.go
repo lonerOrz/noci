@@ -35,21 +35,28 @@ type uploadResult struct {
 }
 
 func (p *Publisher) Publish(ctx context.Context, inputPaths []string) error {
-	index, err := p.client.FetchIndex(ctx)
-	if err != nil {
-		log.Warning("No existing index found. Starting fresh.")
-		index = oci.NewIndex(p.client.Registry(), p.client.Repo())
-	}
-
 	if p.signer != nil {
 		pubKey := p.signer.PrivateKey.Public().(ed25519.PublicKey)
-		index.PublicKey = fmt.Sprintf("%s:%s",
+		publicKeyStr := fmt.Sprintf("%s:%s",
 			p.signer.KeyName,
 			base64.StdEncoding.EncodeToString(pubKey),
 		)
+		pubManifest := oci.OCIManifest{
+			SchemaVersion: 2,
+			MediaType:     "application/vnd.oci.image.manifest.v1+json",
+			Config: oci.Descriptor{
+				MediaType: "application/vnd.oci.image.config.v1+json",
+				Size:      2,
+				Digest:    "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+			},
+			Annotations: map[string]string{
+				"org.nix.public_key": publicKeyStr,
+			},
+		}
+		_ = p.client.PushManifest(ctx, "public-key", &pubManifest)
 	}
 
-	log.Action("Evaluating closure for %d input path(s)...", len(inputPaths))
+	log.Action("Evaluating closure for %d paths...", len(inputPaths))
 	closure, err := nix.GetClosure(ctx, inputPaths)
 	if err != nil {
 		return fmt.Errorf("failed to get closure: %w", err)
@@ -60,7 +67,9 @@ func (p *Publisher) Publish(ctx context.Context, inputPaths []string) error {
 
 	for _, path := range closure {
 		hash := nix.GetPathHash(path)
-		if _, exists := index.Entries[hash]; exists {
+
+		exists, isEvicted := p.client.CheckCacheStatus(ctx, hash)
+		if exists && !isEvicted {
 			continue
 		}
 
@@ -86,18 +95,18 @@ func (p *Publisher) Publish(ctx context.Context, inputPaths []string) error {
 	}
 
 	if skippedUpstreamCount > 0 {
-		log.Success("Skipped %d path(s) that are already cached on upstream (cache.nixos.org).", skippedUpstreamCount)
+		log.Success("Skipped %d upstream-cached paths.", skippedUpstreamCount)
 	}
 
 	if len(uploadList) == 0 {
-		log.Success("Everything is already cached (either in OCI or upstream)!")
+		log.Success("All packages are already cached!")
 		return nil
 	}
 
-	log.Info("Found %d new store path(s) to cache. Executing concurrent upload pipeline...", len(uploadList))
+	log.Info("Found %d new paths. Uploading concurrently...", len(uploadList))
 
 	resultsChan := make(chan uploadResult, len(uploadList))
-	sem := make(chan struct{}, 4) // 限制并发数为 4，防止瞬时 I/O 饱和或被 OCI 注册表限制频次
+	sem := make(chan struct{}, 4)
 	var wg sync.WaitGroup
 
 	pipelineCtx, cancel := context.WithCancel(ctx)
@@ -145,12 +154,31 @@ func (p *Publisher) Publish(ctx context.Context, inputPaths []string) error {
 	}
 
 	for res := range resultsChan {
-		index.AddEntry(res.hash, res.name, res.narinfo, res.digest, res.size, res.refs)
-	}
-
-	log.Action("Updating remote cache-index...")
-	if err := p.client.PushIndex(ctx, index); err != nil {
-		return fmt.Errorf("failed to push updated index: %w", err)
+		manifest := oci.OCIManifest{
+			SchemaVersion: 2,
+			MediaType:     "application/vnd.oci.image.manifest.v1+json",
+			Config: oci.Descriptor{
+				MediaType: "application/vnd.oci.image.config.v1+json",
+				Size:      2,
+				Digest:    "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+			},
+			Layers: []oci.Descriptor{
+				{
+					MediaType: "application/vnd.nix.cache.layer.v1+tar+gzip",
+					Digest:    res.digest,
+					Size:      res.size,
+				},
+			},
+			Annotations: map[string]string{
+				"org.nix.narinfo":    res.narinfo,
+				"org.nix.name":       res.name,
+				"org.nix.references": strings.Join(res.refs, ","),
+			},
+		}
+		log.Action("Pushing manifest: %s", res.hash)
+		if err := p.client.PushManifest(ctx, res.hash, &manifest); err != nil {
+			return fmt.Errorf("push manifest %s failed: %w", res.hash, err)
+		}
 	}
 
 	log.Success("Cached %d packages successfully.", len(uploadList))
@@ -162,26 +190,26 @@ func (p *Publisher) publishSingle(ctx context.Context, info nix.PathInfo) (uploa
 
 	narFile, fileHash, fileSize, err := nix.ExportAndCompress(ctx, info.Path)
 	if err != nil {
-		return uploadResult{}, fmt.Errorf("failed to export %s: %w", info.Path, err)
+		return uploadResult{}, fmt.Errorf("export failed: %w", err)
 	}
 	defer os.Remove(narFile)
 
-	log.Action("Uploading compressed NAR blob (%d bytes)...", fileSize)
+	log.Action("Uploading NAR (%d bytes)...", fileSize)
 	digest, err := p.client.UploadBlob(ctx, narFile, fileHash)
 	if err != nil {
-		return uploadResult{}, fmt.Errorf("failed to upload blob for %s: %w", info.Path, err)
+		return uploadResult{}, fmt.Errorf("upload blob failed: %w", err)
 	}
 
 	normalizedNarHash, err := nix.NormalizeNarHash(info.NarHash)
 	if err != nil {
-		return uploadResult{}, fmt.Errorf("failed to normalize NarHash for %s: %w", info.Path, err)
+		return uploadResult{}, fmt.Errorf("normalize NarHash failed: %w", err)
 	}
 
 	sigs := info.Signatures
 	if p.signer != nil {
 		sig, err := p.signer.SignPath(info.Path, normalizedNarHash, info.NarSize, info.References)
 		if err != nil {
-			return uploadResult{}, fmt.Errorf("failed to sign path: %w", err)
+			return uploadResult{}, fmt.Errorf("sign path failed: %w", err)
 		}
 		sigs = append(sigs, sig)
 	}
