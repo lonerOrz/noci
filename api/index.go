@@ -5,7 +5,6 @@ import (
 	"noci/pkg/server"
 	"os"
 	"strconv"
-	"strings"
 )
 
 var srv *server.Server
@@ -35,16 +34,10 @@ func init() {
 }
 
 func Handler(w http.ResponseWriter, r *http.Request) {
-	path := r.URL.Path
-	if strings.HasPrefix(path, "/api") {
-		path = strings.TrimPrefix(path, "/api")
-	}
-
-	if path == "/nix-cache-info" {
+	if r.URL.Path == "/nix-cache-info" {
 		srv.HandleNixCacheInfo(w, r)
 		return
 	}
 
-	r.URL.Path = path
 	srv.HandleRoutes(w, r)
 }
