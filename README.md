@@ -1,0 +1,139 @@
+# noci
+
+noci (Nix over OCI) is a stateless Nix binary cache toolchain. It utilizes standard OCI container registries (such as GitHub Container Registry) to store and distribute Nix build artifacts, providing a lightweight, self-hosted caching solution for individuals and teams.
+
+## Features
+
+- **push**: Parses Nix Flake or Store paths, calculates dependency closures, automatically filters out public packages already existing upstream (e.g., cache.nixos.org), and compresses, signs, and pushes private packages to OCI.
+- **proxy**: Provides a local HTTP proxy service compliant with the Nix Substituter protocol, transparently converting Nix fetch requests into OCI layer downloads, with built-in access tracking and debounce mechanisms.
+- **gc**: In-memory dependency directed graph coloring (Mark-Sweep) for garbage collection. Supports evicting cold data based on storage limits (Max-Size) and Least Recently Used (LRU) algorithms, featuring grace period protection against race conditions.
+- **pin/unpin**: Manually manages cache lifelines (GC Roots) with Time-To-Live (TTL) support, protecting critical environment data from accidental deletion by the garbage collector.
+
+## Architecture
+
+noci adopts a completely stateless design, eliminating the need for external databases like Postgres or Redis:
+
+1. **Metadata Storage**: All package hashes, signatures, dependency references, and timestamps are serialized into an extremely compact `cache-index` JSON and pushed to OCI as a pseudo-layer.
+2. **Concurrency Control**: The proxy server backend uses Optimistic Concurrency Control (OCC) to merge access heat updates, preventing lost updates in distributed environments.
+3. **Process Management**: Deeply integrates with the Go Context lifecycle, supporting graceful shutdown by catching signals like SIGINT to ensure I/O safety.
+
+## Advantages
+
+- **Low Maintenance Cost**: Reuses existing OCI registry infrastructure (e.g., GHCR free tier) without the need to deploy and maintain extra storage services.
+- **High Transfer Efficiency**: Accurately excludes basic system dependencies from uploading via cryptographic signature comparison, significantly reducing network and storage overhead.
+- **Secure Isolation**: OCI credentials and signing private keys can be injected entirely via environment variables or files, avoiding exposure in the Nix Store.
+
+## Areas for Improvement
+
+- Support concurrent multi-task Blob uploads using Goroutines to improve outbound network utilization.
+- Introduce Zstd compression support (currently uses Gzip only).
+- Abstract the storage layer into interfaces for future extension to native AWS S3 or other storage backends.
+
+## Installation
+
+noci is a standard Nix Flake.
+
+**Temporary Run:**
+
+```bash
+nix run github:lonerOrz/noci -- help
+```
+
+**NixOS Daemon:**
+Import the module in your `flake.nix` and enable it in your system configuration:
+
+```nix
+{
+  imports = [ inputs.noci.nixosModules.default ];
+
+  services.noci-proxy = {
+    enable = true;
+    port = 8080;
+    repo = "lonerOrz/noci-cache";
+    tokenFile = "/path/to/secure/noci-token.env"; # Store sensitive information like NOCI_TOKEN here
+  };
+}
+```
+
+## Usage
+
+**Basic Setup:**
+Generate a Nix signing key pair:
+
+```bash
+nix key generate-secret --key-name "noci" > secret.key
+nix key convert-secret-to-public < secret.key > public.key
+```
+
+Configure environment variables:
+
+```bash
+export NOCI_REPO="your-username/your-cache-repo"
+export NOCI_REGISTRY="ghcr.io"
+export NOCI_SIGNING_KEY=$(cat secret.key)
+export GITHUB_TOKEN="ghp_your_token"
+```
+
+**Daily Operations:**
+
+```bash
+# Push packages to the cache
+noci push .#package
+
+# Pin a version for 30 days, exempt from GC
+noci pin .#package --ttl 30d
+
+# Execute cleanup (5GB budget limit, retaining new packages uploaded within the last 6 hours)
+noci gc --max-size 5GB --grace-period 6h --dry-run=false
+```
+
+## GitHub Actions Integration
+
+You can easily integrate noci into your CI workflow. Create `.github/workflows/nix-cache.yml`:
+
+```yaml
+name: "Nix Build & Cache"
+on: [push]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-cache:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: determinateSystems/nix-installer-action@main
+
+      - run: nix profile install github:lonerOrz/noci
+
+      - name: Build and Push
+        env:
+          NOCI_SIGNING_KEY: ${{ secrets.NIX_SIGNING_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: noci push .#package
+```
+
+## Cache Consumption
+
+On the machine where you want to use the cache:
+
+1. Start the local proxy service:
+
+```bash
+noci proxy --port 8080 --repo "your-username/your-cache-repo" &
+```
+
+2. Use with Nix commands (can also be permanently configured in `/etc/nix/nix.conf`):
+
+```bash
+nix build .#package \
+  --substituters "http://127.0.0.1:8080" \
+  --trusted-public-keys "$(cat public.key)"
+```
+
+## Acknowledgments
+
+- The Nix / NixOS community for the declarative package management ecosystem.
+- The OCI (Open Container Initiative) standards for image distribution specifications.
