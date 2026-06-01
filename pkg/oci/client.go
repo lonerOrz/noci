@@ -3,12 +3,13 @@ package oci
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
-	"noci/pkg/log"
 	"os"
 	"strings"
 	"sync"
@@ -40,6 +41,9 @@ type Client struct {
 }
 
 func NewClient(registry, repo, token string) *Client {
+	if registry == "" || repo == "" {
+		panic("oci: registry and repo must not be empty")
+	}
 	transport := &http.Transport{
 		MaxIdleConns:        100,
 		IdleConnTimeout:     90 * time.Second,
@@ -52,9 +56,6 @@ func NewClient(registry, repo, token string) *Client {
 		client: &http.Client{
 			Timeout:   5 * time.Minute,
 			Transport: transport,
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
 		},
 	}
 }
@@ -121,6 +122,34 @@ func (c *Client) Request(ctx context.Context, method, path string, body io.Reade
 	}
 
 	return c.client.Do(req)
+}
+
+func (c *Client) getTransport() http.RoundTripper {
+	if c.client.Transport != nil {
+		return c.client.Transport
+	}
+	return http.DefaultTransport
+}
+
+func (c *Client) RawRequest(ctx context.Context, method, path string, body io.Reader, contentType string) (*http.Response, error) {
+	token, err := c.getOciToken(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	url := fmt.Sprintf("https://%s/v2/%s/nix-cache%s", c.registry, c.repo, path)
+	req, err := http.NewRequestWithContext(ctx, method, url, body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("Authorization", "Bearer "+token)
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+		req.Header.Set("Accept", contentType)
+	}
+
+	return c.getTransport().RoundTrip(req)
 }
 
 func (c *Client) FetchManifest(ctx context.Context, tag string) (*OCIManifest, error) {
@@ -207,23 +236,77 @@ func (c *Client) GetBlobRedirectURL(ctx context.Context, digest string) (string,
 }
 
 func (c *Client) ListTags(ctx context.Context) ([]string, error) {
-	resp, err := c.Request(ctx, "GET", "/tags/list", nil, "")
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
+	var allTags []string
+	path := "/tags/list"
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("failed to list tags: HTTP %d", resp.StatusCode)
+	for {
+		resp, err := c.Request(ctx, "GET", path, nil, "")
+		if err != nil {
+			return nil, err
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			return nil, fmt.Errorf("failed to list tags: HTTP %d", resp.StatusCode)
+		}
+
+		var res struct {
+			Tags []string `json:"tags"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+			resp.Body.Close()
+			return nil, err
+		}
+		resp.Body.Close()
+
+		allTags = append(allTags, res.Tags...)
+
+		link := resp.Header.Get("Link")
+		if link == "" {
+			break
+		}
+
+		next := parseNextLink(link)
+		if next == "" {
+			break
+		}
+		path = next
+		if !strings.HasPrefix(path, "/") {
+			path = "/" + path
+		}
 	}
 
-	var res struct {
-		Tags []string `json:"tags"`
+	return allTags, nil
+}
+
+func parseNextLink(link string) string {
+	for _, part := range strings.Split(link, ",") {
+		part = strings.TrimSpace(part)
+		if !strings.Contains(part, `rel="next"`) {
+			continue
+		}
+		start := strings.Index(part, "<")
+		end := strings.Index(part, ">")
+		if start == -1 || end == -1 || end <= start {
+			continue
+		}
+		rawURL := part[start+1 : end]
+		u, err := url.Parse(rawURL)
+		if err != nil {
+			continue
+		}
+		// Only keep the relative endpoint path, stripping /v2/<repo>/nix-cache prefix.
+		path := u.Path
+		q := u.RawQuery
+		if idx := strings.LastIndex(path, "/tags/list"); idx != -1 {
+			path = path[idx:]
+		}
+		if q != "" {
+			return path + "?" + q
+		}
+		return path
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
-		return nil, err
-	}
-	return res.Tags, nil
+	return ""
 }
 
 func (c *Client) DeleteManifest(ctx context.Context, digest string) error {
@@ -240,132 +323,77 @@ func (c *Client) DeleteManifest(ctx context.Context, digest string) error {
 }
 
 func (c *Client) FetchIndex(ctx context.Context) (*CacheIndex, error) {
-	tags, err := c.ListTags(ctx)
+	manifest, err := c.FetchManifest(ctx, "noci-index")
+	if err != nil {
+		if strings.Contains(err.Error(), "HTTP 404") {
+			return NewIndex(c.registry, c.repo), nil
+		}
+		return nil, err
+	}
+
+	if len(manifest.Layers) == 0 {
+		return NewIndex(c.registry, c.repo), nil
+	}
+
+	data, err := c.downloadBlob(ctx, manifest.Layers[0].Digest)
 	if err != nil {
 		return nil, err
 	}
 
-	idx := NewIndex(c.registry, c.repo)
-	sem := make(chan struct{}, 10)
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-
-	for _, tag := range tags {
-		if len(tag) != 32 {
-			continue
-		}
-
-		sem <- struct{}{}
-		wg.Add(1)
-		go func(t string) {
-			defer func() {
-				<-sem
-				wg.Done()
-			}()
-
-			manifest, err := c.FetchManifest(ctx, t)
-			if err != nil || manifest.Annotations == nil {
-				return
-			}
-			if manifest.Annotations["org.nix.evicted"] == "true" {
-				return
-			}
-
-			narinfo := manifest.Annotations["org.nix.narinfo"]
-			if narinfo == "" {
-				return
-			}
-
-			mu.Lock()
-			idx.Entries[t] = IndexItem{
-				Name:       manifest.Annotations["org.nix.name"],
-				NarInfo:    narinfo,
-				NarDigest:  manifest.Layers[0].Digest,
-				NarSize:    manifest.Layers[0].Size,
-				Added:      time.Now(),
-				LastUsed:   time.Now(),
-				UploadedAt: time.Now(),
-				References: parseReferencesFromNarInfo(narinfo),
-			}
-
-			if pinnedStr := manifest.Annotations["org.nix.pinned_until"]; pinnedStr != "" {
-				var ttl int64
-				fmt.Sscanf(pinnedStr, "%d", &ttl)
-				idx.Roots[t] = GCRoot{
-					PinnedAt: time.Now(),
-					TTL:      ttl,
-				}
-			}
-			mu.Unlock()
-		}(tag)
+	var idx CacheIndex
+	if err := json.Unmarshal(data, &idx); err != nil {
+		return nil, err
 	}
-	wg.Wait()
-
-	return idx, nil
+	idx.Upgrade()
+	return &idx, nil
 }
 
 func (c *Client) PushIndex(ctx context.Context, idx *CacheIndex) error {
-	tags, err := c.ListTags(ctx)
+	idx.Generated = time.Now()
+	data, err := json.Marshal(idx)
 	if err != nil {
 		return err
 	}
 
-	for _, tag := range tags {
-		if len(tag) != 32 {
-			continue
-		}
-		if _, exists := idx.Entries[tag]; !exists {
-			manifest, err := c.FetchManifest(ctx, tag)
-			if err != nil {
-				continue
-			}
-			if manifest.Annotations == nil {
-				manifest.Annotations = make(map[string]string)
-			}
-			if manifest.Annotations["org.nix.evicted"] != "true" {
-				log.Action("Marking evicted: %s", tag)
-				manifest.Annotations["org.nix.evicted"] = "true"
-				_ = c.PushManifest(ctx, tag, manifest)
-			}
-			continue
-		}
+	tmp, err := os.CreateTemp("", "noci-index-*.json")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+
+	h := sha256.New()
+	if _, err := io.Copy(io.MultiWriter(tmp, h), bytes.NewReader(data)); err != nil {
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
 	}
 
-	for hash, root := range idx.Roots {
-		manifest, err := c.FetchManifest(ctx, hash)
-		if err != nil {
-			continue
-		}
-		if manifest.Annotations == nil {
-			manifest.Annotations = make(map[string]string)
-		}
-
-		pinnedStr := fmt.Sprintf("%d", root.TTL)
-		if manifest.Annotations["org.nix.pinned_until"] != pinnedStr {
-			manifest.Annotations["org.nix.pinned_until"] = pinnedStr
-			log.Action("Pinning tag: %s", hash)
-			_ = c.PushManifest(ctx, hash, manifest)
-		}
+	digest, err := c.UploadBlob(ctx, tmp.Name(), hex.EncodeToString(h.Sum(nil)))
+	if err != nil {
+		return err
 	}
 
-	for _, tag := range tags {
-		if len(tag) != 32 {
-			continue
-		}
-		if _, pinned := idx.Roots[tag]; !pinned {
-			manifest, err := c.FetchManifest(ctx, tag)
-			if err != nil {
-				continue
-			}
-			if manifest.Annotations != nil && manifest.Annotations["org.nix.pinned_until"] != "" {
-				delete(manifest.Annotations, "org.nix.pinned_until")
-				log.Action("Unpinning tag: %s", tag)
-				_ = c.PushManifest(ctx, tag, manifest)
-			}
-		}
+	indexManifest := OCIManifest{
+		SchemaVersion: 2,
+		MediaType:     "application/vnd.oci.image.manifest.v1+json",
+		Config: Descriptor{
+			MediaType: "application/vnd.noci.index.config.v1+json",
+			Size:      2,
+			Digest:    "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+		},
+		Layers: []Descriptor{
+			{
+				MediaType: "application/vnd.noci.index.layer.v1+json",
+				Digest:    digest,
+				Size:      int64(len(data)),
+			},
+		},
+		Annotations: map[string]string{
+			"org.nix.index.generated_at": time.Now().UTC().Format(time.RFC3339),
+		},
 	}
-
-	return nil
+	return c.PushManifest(ctx, "noci-index", &indexManifest)
 }
 
 func (c *Client) UploadBlob(ctx context.Context, filePath, sha256Hex string) (string, error) {
@@ -437,6 +465,18 @@ func (c *Client) UploadBlob(ctx context.Context, filePath, sha256Hex string) (st
 	}
 
 	return digest, nil
+}
+
+func (c *Client) downloadBlob(ctx context.Context, digest string) ([]byte, error) {
+	resp, err := c.Request(ctx, "GET", "/blobs/"+digest, nil, "")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("blob %s not found: HTTP %d", digest, resp.StatusCode)
+	}
+	return io.ReadAll(resp.Body)
 }
 
 func (c *Client) DeleteBlob(ctx context.Context, digest string) error {

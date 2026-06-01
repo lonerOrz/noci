@@ -87,7 +87,7 @@ func GetPathInfo(ctx context.Context, storePath string) (*PathInfo, error) {
 
 // BuildTarget 执行本地 `nix build`
 func BuildTarget(ctx context.Context, target string) ([]string, error) {
-	cmd := exec.CommandContext(ctx, "nix", "build", target, "-L", "--no-link", "--json")
+	cmd := exec.CommandContext(ctx, "nix", "build", "--extra-experimental-features", "nix-command flakes", target, "-L", "--no-link", "--json")
 	var out bytes.Buffer
 	var errOut bytes.Buffer
 

@@ -14,14 +14,19 @@ import (
 )
 
 type Publisher struct {
-	client *oci.Client
-	signer *nix.Signer
+	client       *oci.Client
+	signer       *nix.Signer
+	skipUpstream bool
 }
 
-func NewPublisher(client *oci.Client, signer *nix.Signer) *Publisher {
+func NewPublisher(client *oci.Client, signer *nix.Signer, skipUpstream bool) *Publisher {
+	if client == nil || signer == nil {
+		panic("publisher: client and signer must not be nil")
+	}
 	return &Publisher{
-		client: client,
-		signer: signer,
+		client:       client,
+		signer:       signer,
+		skipUpstream: skipUpstream,
 	}
 }
 
@@ -56,6 +61,11 @@ func (p *Publisher) Publish(ctx context.Context, inputPaths []string) error {
 		_ = p.client.PushManifest(ctx, "public-key", &pubManifest)
 	}
 
+	index, err := p.client.FetchIndex(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to load index: %w", err)
+	}
+
 	log.Action("Evaluating closure for %d paths...", len(inputPaths))
 	closure, err := nix.GetClosure(ctx, inputPaths)
 	if err != nil {
@@ -68,8 +78,7 @@ func (p *Publisher) Publish(ctx context.Context, inputPaths []string) error {
 	for _, path := range closure {
 		hash := nix.GetPathHash(path)
 
-		exists, isEvicted := p.client.CheckCacheStatus(ctx, hash)
-		if exists && !isEvicted {
+		if _, exists := index.Entries[hash]; exists {
 			continue
 		}
 
@@ -78,20 +87,17 @@ func (p *Publisher) Publish(ctx context.Context, inputPaths []string) error {
 			return fmt.Errorf("failed to get path info for %s: %w", path, err)
 		}
 
-		hasUpstreamSig := false
-		for _, sig := range info.Signatures {
-			if strings.HasPrefix(sig, "cache.nixos.org-1:") {
-				hasUpstreamSig = true
-				break
+		if p.skipUpstream {
+			for _, sig := range info.Signatures {
+				if strings.HasPrefix(sig, "cache.nixos.org-1:") {
+					skippedUpstreamCount++
+					goto nextPath
+				}
 			}
 		}
 
-		if hasUpstreamSig {
-			skippedUpstreamCount++
-			continue
-		}
-
 		uploadList = append(uploadList, *info)
+	nextPath:
 	}
 
 	if skippedUpstreamCount > 0 {
@@ -105,7 +111,7 @@ func (p *Publisher) Publish(ctx context.Context, inputPaths []string) error {
 
 	log.Info("Found %d new paths. Uploading concurrently...", len(uploadList))
 
-	resultsChan := make(chan uploadResult, len(uploadList))
+	outcomeChan := make(chan uploadResult, len(uploadList))
 	sem := make(chan struct{}, 4)
 	var wg sync.WaitGroup
 
@@ -142,43 +148,55 @@ func (p *Publisher) Publish(ctx context.Context, inputPaths []string) error {
 				errMu.Unlock()
 				return
 			}
-			resultsChan <- res
+
+			manifest := oci.OCIManifest{
+				SchemaVersion: 2,
+				MediaType:     "application/vnd.oci.image.manifest.v1+json",
+				Config: oci.Descriptor{
+					MediaType: "application/vnd.oci.image.config.v1+json",
+					Size:      2,
+					Digest:    "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+				},
+				Layers: []oci.Descriptor{
+					{
+						MediaType: "application/vnd.nix.cache.layer.v1+tar+gzip",
+						Digest:    res.digest,
+						Size:      res.size,
+					},
+				},
+				Annotations: map[string]string{
+					"org.nix.narinfo":    res.narinfo,
+					"org.nix.name":       res.name,
+					"org.nix.references": strings.Join(res.refs, ","),
+				},
+			}
+			if err := p.client.PushManifest(pipelineCtx, res.hash, &manifest); err != nil {
+				errMu.Lock()
+				if firstErr == nil {
+					firstErr = fmt.Errorf("push manifest %s failed: %w", res.hash, err)
+					cancel()
+				}
+				errMu.Unlock()
+				return
+			}
+
+			outcomeChan <- res
 		}(info)
 	}
 
 	wg.Wait()
-	close(resultsChan)
+	close(outcomeChan)
 
 	if firstErr != nil {
 		return firstErr
 	}
 
-	for res := range resultsChan {
-		manifest := oci.OCIManifest{
-			SchemaVersion: 2,
-			MediaType:     "application/vnd.oci.image.manifest.v1+json",
-			Config: oci.Descriptor{
-				MediaType: "application/vnd.oci.image.config.v1+json",
-				Size:      2,
-				Digest:    "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-			},
-			Layers: []oci.Descriptor{
-				{
-					MediaType: "application/vnd.nix.cache.layer.v1+tar+gzip",
-					Digest:    res.digest,
-					Size:      res.size,
-				},
-			},
-			Annotations: map[string]string{
-				"org.nix.narinfo":    res.narinfo,
-				"org.nix.name":       res.name,
-				"org.nix.references": strings.Join(res.refs, ","),
-			},
-		}
-		log.Action("Pushing manifest: %s", res.hash)
-		if err := p.client.PushManifest(ctx, res.hash, &manifest); err != nil {
-			return fmt.Errorf("push manifest %s failed: %w", res.hash, err)
-		}
+	for res := range outcomeChan {
+		index.AddEntry(res.hash, res.name, res.narinfo, res.digest, res.size, res.refs)
+	}
+
+	if err := p.client.PushIndex(ctx, index); err != nil {
+		return fmt.Errorf("failed to push updated index: %w", err)
 	}
 
 	log.Success("Cached %d packages successfully.", len(uploadList))

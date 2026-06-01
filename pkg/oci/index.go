@@ -90,10 +90,12 @@ func (idx *CacheIndex) Upgrade() {
 
 func (idx *CacheIndex) AddEntry(hash, name, narinfo, digest string, size int64, refs []string) {
 	now := time.Now()
+	// Normalize: strip "sha256:" prefix from digest so NarDigest always stores bare hex.
+	hex := strings.TrimPrefix(digest, "sha256:")
 	idx.Entries[hash] = IndexItem{
 		Name:       name,
 		NarInfo:    narinfo,
-		NarDigest:  digest,
+		NarDigest:  hex,
 		NarSize:    size,
 		Added:      now,
 		LastUsed:   now,

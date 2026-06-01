@@ -4,7 +4,7 @@ noci (Nix over OCI) is a stateless Nix binary cache toolchain. It utilizes stand
 
 ## Features
 
-- **push**: Parses Nix Flake or Store paths, calculates dependency closures, automatically filters out packages that already exist in the OCI cache or carry an upstream `cache.nixos.org-1:` signature (indicating they are public upstream packages), and compresses, signs, and pushes remaining private packages to OCI.
+- **push**: Parses Nix Flake or Store paths, calculates dependency closures, automatically filters out packages that already exist in the OCI cache or carry an upstream `cache.nixos.org-1:` signature (indicating they are public upstream packages), and compresses, signs, and pushes remaining private packages to OCI. Use `--skip-upstream` to disable upstream-signature filtering and mirror all packages including public ones.
 - **proxy**: Provides a local HTTP proxy service compliant with the Nix Substituter protocol, transparently converting Nix fetch requests into OCI layer downloads. Features an in-memory tag cache with lazy refresh and TTL, a negative cache for 404 suppression, and a fallback upstream proxy to the official Nix cache.
 - **gc**: In-memory dependency directed graph coloring (Mark-Sweep) for garbage collection. Supports evicting cold data based on storage limits (Max-Size) and Least Recently Used (LRU) algorithms, featuring grace period protection against race conditions.
 - **pin/unpin**: Manually manages cache lifelines (GC Roots) with Time-To-Live (TTL) support, protecting critical environment data from accidental deletion by the garbage collector.
@@ -13,7 +13,7 @@ noci (Nix over OCI) is a stateless Nix binary cache toolchain. It utilizes stand
 
 noci adopts a completely stateless design, eliminating the need for external databases like Postgres or Redis:
 
-1. **Metadata Storage**: Each cached Nix package is stored as an OCI manifest tagged by its 32-character hash. All metadata (narinfo, dependency references, timestamps, pin state, GC eviction markers) is stored as **annotations** on the individual manifest — no standalone index blob. The logical `CacheIndex` is **reconstructed on-the-fly** by listing all OCI tags and aggregating their annotations at runtime. Push/Pin/GC operations reconcile the index back by updating annotations on the relevant manifests.
+1. **Unified Index Blob**: The entire `CacheIndex` (entries, roots, registry info) is serialized to JSON and stored as a single OCI blob with media type `application/vnd.noci.index.v1+json`, referenced by a dedicated `noci-index` manifest — avoiding OCI annotation size limits. Unlike tag-scanning approaches, fetching the index is a single O(1) blob download. Push/Pin/GC operations update this single source of truth atomically. The proxy server, GC engine, and publisher all consume the same unified index, eliminating the stale-tag-walking problem entirely.
 
 2. **GC Concurrency Safety**: The garbage collector follows a read-only analysis + apply pattern: it fetches the full index from OCI, performs Mark-Sweep coloring entirely in memory (`Sweep`), and only mutates the index in a separate `Apply` phase before pushing the updated state back. This avoids in-place mutation of remote state.
 
@@ -27,7 +27,7 @@ noci adopts a completely stateless design, eliminating the need for external dat
 
 ## Areas for Improvement
 
-- Increase blob upload concurrency beyond the current hardcoded limit of 4 goroutines, or make it configurable.
+- Make the upload worker pool size configurable (currently hardcoded to 4 goroutines for blob+manifest concurrent push).
 - Introduce Zstd compression support (currently uses Gzip only).
 - Abstract the storage layer into interfaces for future extension to native AWS S3 or other storage backends.
 

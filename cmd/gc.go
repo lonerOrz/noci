@@ -85,13 +85,13 @@ func runGC(cmd *cobra.Command, args []string) error {
 		for _, key := range result.EvictedKeys {
 			entry := index.Entries[key]
 			log.Action("Deleting blob: %s", key)
-			if err := client.DeleteBlob(ctx, entry.NarDigest); err != nil {
+			if err := client.DeleteBlob(ctx, "sha256:"+entry.NarDigest); err != nil {
 				errMsg := err.Error()
 				if strings.Contains(errMsg, "405") || strings.Contains(errMsg, "UNSUPPORTED") {
 					log.Warning("Blob deletion unsupported (405). Skipping.")
 					break
 				}
-				log.Warning("Failed to delete blob %s: %v", entry.NarDigest, err)
+				log.Warning("Failed to delete blob sha256:%s: %v", entry.NarDigest, err)
 			}
 		}
 	}

@@ -12,19 +12,22 @@ import (
 )
 
 type Server struct {
-	addr           string
-	upstream       string
-	ttl            int
-	client         *oci.Client
-	upstreamProxy  *httputil.ReverseProxy
-	tagsMu         sync.RWMutex
-	tags           map[string]struct{}
-	negCache       sync.Map
-	lastTagsFetch  time.Time
-	fetchMu        sync.Mutex
+	addr          string
+	upstream      string
+	ttl           int
+	client        *oci.Client
+	upstreamProxy *httputil.ReverseProxy
+	indexMu       sync.RWMutex
+	index         *oci.CacheIndex
+	negCache      sync.Map
+	lastFetch     time.Time
+	fetchMu       sync.Mutex
 }
 
 func NewServer(registry, repo, token, addr, upstream string, ttl int) *Server {
+	if registry == "" || repo == "" || addr == "" {
+		panic("server: registry, repo, and addr must not be empty")
+	}
 	targetURL, err := url.Parse(upstream)
 	var proxy *httputil.ReverseProxy
 	if err == nil {
@@ -51,7 +54,7 @@ func (s *Server) Start(ctx context.Context) error {
 	go func() {
 		warmCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		_ = s.RefreshTags(warmCtx)
+		_ = s.RefreshIndex(warmCtx)
 	}()
 
 	mux := http.NewServeMux()
@@ -78,34 +81,25 @@ func (s *Server) Start(ctx context.Context) error {
 	return nil
 }
 
-func (s *Server) RefreshTags(ctx context.Context) error {
-	tags, err := s.client.ListTags(ctx)
+func (s *Server) RefreshIndex(ctx context.Context) error {
+	idx, err := s.client.FetchIndex(ctx)
 	if err != nil {
 		return err
 	}
 
-	newTags := make(map[string]struct{})
-	nixCount := 0
-	for _, tag := range tags {
-		newTags[tag] = struct{}{}
-		if len(tag) == 32 {
-			nixCount++
-		}
-	}
+	s.indexMu.Lock()
+	s.index = idx
+	s.lastFetch = time.Now()
+	s.indexMu.Unlock()
 
-	s.tagsMu.Lock()
-	s.tags = newTags
-	s.lastTagsFetch = time.Now()
-	s.tagsMu.Unlock()
-
-	log.Success("Cache warmed. Packages: %d (Total tags: %d)", nixCount, len(tags))
+	log.Success("Cache warmed. Package Entries: %d", len(idx.Entries))
 	return nil
 }
 
-func (s *Server) loadTagsLazy(ctx context.Context) {
-	s.tagsMu.RLock()
-	needRefresh := s.tags == nil || time.Since(s.lastTagsFetch) > time.Duration(s.ttl)*time.Second
-	s.tagsMu.RUnlock()
+func (s *Server) loadIndexLazy(ctx context.Context) {
+	s.indexMu.RLock()
+	needRefresh := s.index == nil || time.Since(s.lastFetch) > time.Duration(s.ttl)*time.Second
+	s.indexMu.RUnlock()
 
 	if !needRefresh {
 		return
@@ -114,11 +108,13 @@ func (s *Server) loadTagsLazy(ctx context.Context) {
 	s.fetchMu.Lock()
 	defer s.fetchMu.Unlock()
 
-	s.tagsMu.RLock()
-	needRefresh = s.tags == nil || time.Since(s.lastTagsFetch) > time.Duration(s.ttl)*time.Second
-	s.tagsMu.RUnlock()
+	s.indexMu.RLock()
+	needRefresh = s.index == nil || time.Since(s.lastFetch) > time.Duration(s.ttl)*time.Second
+	s.indexMu.RUnlock()
 
 	if needRefresh {
-		_ = s.RefreshTags(ctx)
+		if err := s.RefreshIndex(ctx); err != nil {
+			log.Warning("Failed to lazy load index: %v", err)
+		}
 	}
 }

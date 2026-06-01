@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -19,10 +20,9 @@ type OCIConfig struct {
 	Token    string
 }
 
-var sizeRegex = regexp.MustCompile(`^(\d+)\s*(B|KB|MB|GB|TB)?$`)
+var sizeRegex = regexp.MustCompile(`^(\d+)\s*(B|KB|MB|GB|TB|K|M|G|T)?$`)
 
-// nixHashRegex 标准 Nix base32 哈希前缀规则检测（32位小写，滤除 e, o, t, u 字符）
-var nixHashRegex = regexp.MustCompile(`^[0-9abcdfghijklmnpqrsvwunsch]{32}$`)
+var nixHashRegex = regexp.MustCompile(`^[0-9abcdfghijklmnpqrsvwxyz]{32}$`)
 
 type CommonFlags struct {
 	Repo     string
@@ -111,6 +111,28 @@ func resolveHashes(ctx context.Context, args []string, allowBuild bool) ([]strin
 	return hashes, nil
 }
 
+// parseTTL converts human-friendly TTL strings to seconds.
+// Supports: "30d", "24h", "90m", "0" (permanent), and Go duration format.
+func parseTTL(ttl string) (int64, error) {
+	cleaned := strings.ToLower(strings.TrimSpace(ttl))
+	if cleaned == "0" {
+		return 0, nil
+	}
+	if strings.HasSuffix(cleaned, "d") {
+		daysStr := strings.TrimSuffix(cleaned, "d")
+		days, err := strconv.ParseInt(daysStr, 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("invalid day format for TTL: %s", ttl)
+		}
+		return days * 24 * 3600, nil
+	}
+	dur, err := time.ParseDuration(ttl)
+	if err != nil {
+		return 0, fmt.Errorf("failed to parse TTL: %w", err)
+	}
+	return int64(dur.Seconds()), nil
+}
+
 // parseSizeString 解析人类易读的大小限制字符串为字节数
 func parseSizeString(sizeStr string) (int64, error) {
 	sizeStr = strings.ToUpper(strings.TrimSpace(sizeStr))
@@ -130,13 +152,13 @@ func parseSizeString(sizeStr string) (int64, error) {
 		unit = matches[2]
 	}
 	switch unit {
-	case "KB":
+	case "K", "KB":
 		return val * 1024, nil
-	case "MB":
+	case "M", "MB":
 		return val * 1024 * 1024, nil
-	case "GB":
+	case "G", "GB":
 		return val * 1024 * 1024 * 1024, nil
-	case "TB":
+	case "T", "TB":
 		return val * 1024 * 1024 * 1024 * 1024, nil
 	default:
 		return val, nil

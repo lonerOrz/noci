@@ -1,6 +1,7 @@
 package gc
 
 import (
+	"noci/pkg/nix"
 	"noci/pkg/oci"
 	"path/filepath"
 	"sort"
@@ -13,6 +14,9 @@ type Engine struct {
 }
 
 func NewEngine(index *oci.CacheIndex, gracePeriod time.Duration) *Engine {
+	if index == nil {
+		panic("gc: nil index passed to NewEngine")
+	}
 	return &Engine{
 		index:       index,
 		gracePeriod: gracePeriod,
@@ -157,5 +161,9 @@ func getHashFromPath(storePath string) string {
 	if len(base) < 32 {
 		return ""
 	}
-	return base[:32]
+	hash := base[:32]
+	if !nix.IsValidNixHash(hash) {
+		return ""
+	}
+	return hash
 }

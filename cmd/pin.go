@@ -4,9 +4,6 @@ import (
 	"fmt"
 	"noci/pkg/log"
 	"noci/pkg/oci"
-	"strconv"
-	"strings"
-	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -41,23 +38,9 @@ func runPin(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	var ttlSeconds int64
-	if pinTTL != "0" {
-		cleanedTTL := strings.ToLower(strings.TrimSpace(pinTTL))
-		if strings.HasSuffix(cleanedTTL, "d") {
-			daysStr := strings.TrimSuffix(cleanedTTL, "d")
-			days, err := strconv.ParseInt(daysStr, 10, 64)
-			if err != nil {
-				return fmt.Errorf("invalid day format for TTL: %s", pinTTL)
-			}
-			ttlSeconds = days * 24 * 3600
-		} else {
-			dur, err := time.ParseDuration(pinTTL)
-			if err != nil {
-				return fmt.Errorf("failed to parse TTL duration: %w", err)
-			}
-			ttlSeconds = int64(dur.Seconds())
-		}
+	ttlSeconds, err := parseTTL(pinTTL)
+	if err != nil {
+		return fmt.Errorf("invalid --ttl value: %w", err)
 	}
 
 	// 统一利用 resolveHashes 解析（策略上允许降级调用本地 `nix build` 获取新构建的 hash）

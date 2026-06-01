@@ -3,6 +3,7 @@ package cmd
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"noci/pkg/log"
 	"noci/pkg/nix"
 	"noci/pkg/oci"
@@ -14,9 +15,9 @@ import (
 )
 
 var (
-	pushFlags     CommonFlags
-	pushKeyFile   string
-	pushConfigDir string
+	pushFlags       CommonFlags
+	pushKeyFile     string
+	pushSkipUpstream bool
 )
 
 var pushCmd = &cobra.Command{
@@ -28,7 +29,7 @@ var pushCmd = &cobra.Command{
 func init() {
 	pushFlags.Register(pushCmd)
 	pushCmd.Flags().StringVar(&pushKeyFile, "key-file", "", "Nix private signing key file (optional)")
-	pushCmd.Flags().StringVar(&pushConfigDir, "config-dir", "config", "Path to Nix flake directory")
+	pushCmd.Flags().BoolVar(&pushSkipUpstream, "skip-upstream", true, "Skip pushing packages that carry an upstream cache.nixos.org signature")
 }
 
 func runPush(cmd *cobra.Command, args []string) error {
@@ -86,18 +87,22 @@ func runPush(cmd *cobra.Command, args []string) error {
 	}
 
 	if len(inputPaths) == 0 {
-		scanner := bufio.NewScanner(os.Stdin)
-		for scanner.Scan() {
-			line := strings.TrimSpace(scanner.Text())
-			if line != "" {
-				if strings.HasPrefix(line, "[") || strings.HasPrefix(line, "{") {
-					paths, err := nix.ParseJSONBuildOutputs([]byte(line))
-					if err == nil {
-						inputPaths = append(inputPaths, paths...)
-					}
-					continue
+		stdinBytes, err := io.ReadAll(os.Stdin)
+		if err == nil && len(stdinBytes) > 0 {
+			trimmed := strings.TrimSpace(string(stdinBytes))
+			if strings.HasPrefix(trimmed, "[") || strings.HasPrefix(trimmed, "{") {
+				paths, err := nix.ParseJSONBuildOutputs([]byte(trimmed))
+				if err == nil {
+					inputPaths = append(inputPaths, paths...)
 				}
-				inputPaths = append(inputPaths, line)
+			} else {
+				scanner := bufio.NewScanner(strings.NewReader(trimmed))
+				for scanner.Scan() {
+					line := strings.TrimSpace(scanner.Text())
+					if line != "" {
+						inputPaths = append(inputPaths, line)
+					}
+				}
 			}
 		}
 	}
@@ -107,7 +112,7 @@ func runPush(cmd *cobra.Command, args []string) error {
 	}
 
 	client := oci.NewClient(cfg.Registry, cfg.Repo, cfg.Token)
-	pub := publisher.NewPublisher(client, signer)
+	pub := publisher.NewPublisher(client, signer, pushSkipUpstream)
 
 	return pub.Publish(ctx, inputPaths)
 }

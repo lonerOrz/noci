@@ -61,7 +61,21 @@ func (s *Signer) SignPath(storePath, narHash string, narSize int64, refs []strin
 	return fmt.Sprintf("%s:%s", s.KeyName, encodedSig), nil
 }
 
-const nixAlphabet = "0123456789abcdfghijklmnpqrsvwxyz"
+const NixAlphabet = "0123456789abcdfghijklmnpqrsvwxyz"
+
+func IsValidNixHash(s string) bool {
+	if len(s) != 32 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !((c >= '0' && c <= '9') ||
+			(c >= 'a' && c <= 'z' && c != 'e' && c != 'o' && c != 't' && c != 'u')) {
+			return false
+		}
+	}
+	return true
+}
 
 // NormalizeNarHash 将任意 "sha256-xxxx..."（SRI）格式无损转换为标准 "sha256:xxxx..."（Nix Base32）
 func NormalizeNarHash(hash string) (string, error) {
@@ -99,7 +113,7 @@ func encodeNixBase32(b []byte) string {
 		if bit > 3 && c+1 < len(b) {
 			val |= b[c+1] << (8 - bit)
 		}
-		out[i] = nixAlphabet[val&0x1f]
+		out[i] = NixAlphabet[val&0x1f]
 	}
 	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
 		out[i], out[j] = out[j], out[i]
