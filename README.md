@@ -124,7 +124,7 @@ On the machine where you want to use the cache:
 1. Start the local proxy service:
 
 ```bash
-noci proxy --port 8080 --repo "your-username/your-cache-repo" --listen "127.0.0.1" --upstream "https://cache.nixos.org" --ttl 300 &
+noci proxy --port 8080 --repo "your-username/your-cache-repo" --listen "127.0.0.1" --upstream "https://cache.nixos.org" &
 ```
 
 2. Use with Nix commands (can also be permanently configured in `/etc/nix/nix.conf`):

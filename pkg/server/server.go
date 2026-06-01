@@ -14,7 +14,6 @@ import (
 type Server struct {
 	addr          string
 	upstream      string
-	ttl           int
 	client        *oci.Client
 	upstreamProxy *httputil.ReverseProxy
 	indexMu       sync.RWMutex
@@ -24,7 +23,7 @@ type Server struct {
 	fetchMu       sync.Mutex
 }
 
-func NewServer(registry, repo, token, addr, upstream string, ttl int) *Server {
+func NewServer(registry, repo, token, addr, upstream string) *Server {
 	if registry == "" || repo == "" || addr == "" {
 		panic("server: registry, repo, and addr must not be empty")
 	}
@@ -44,7 +43,6 @@ func NewServer(registry, repo, token, addr, upstream string, ttl int) *Server {
 	return &Server{
 		addr:          addr,
 		upstream:      upstream,
-		ttl:           ttl,
 		client:        oci.NewClient(registry, repo, token),
 		upstreamProxy: proxy,
 	}
@@ -98,7 +96,7 @@ func (s *Server) RefreshIndex(ctx context.Context) error {
 
 func (s *Server) loadIndexLazy(ctx context.Context) {
 	s.indexMu.RLock()
-	needRefresh := s.index == nil || time.Since(s.lastFetch) > time.Duration(s.ttl)*time.Second
+	needRefresh := s.index == nil || time.Since(s.lastFetch) > 300*time.Second
 	s.indexMu.RUnlock()
 
 	if !needRefresh {
@@ -109,7 +107,7 @@ func (s *Server) loadIndexLazy(ctx context.Context) {
 	defer s.fetchMu.Unlock()
 
 	s.indexMu.RLock()
-	needRefresh = s.index == nil || time.Since(s.lastFetch) > time.Duration(s.ttl)*time.Second
+	needRefresh = s.index == nil || time.Since(s.lastFetch) > 300*time.Second
 	s.indexMu.RUnlock()
 
 	if needRefresh {

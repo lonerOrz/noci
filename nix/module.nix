@@ -51,12 +51,6 @@ in
       description = "Fallback upstream cache.";
     };
 
-    ttl = mkOption {
-      type = types.int;
-      default = 300;
-      description = "Index TTL in seconds.";
-    };
-
     tokenFile = mkOption {
       type = types.nullOr types.path;
       default = null;
@@ -75,7 +69,7 @@ in
       wantedBy = [ "multi-user.target" ];
 
       serviceConfig = {
-        ExecStart = "${cfg.package}/bin/noci proxy --repo ${cfg.repo} --registry ${cfg.registry} --port ${toString cfg.port} --listen ${cfg.listen} --upstream ${cfg.upstream} --ttl ${toString cfg.ttl}";
+        ExecStart = "${cfg.package}/bin/noci proxy --repo ${cfg.repo} --registry ${cfg.registry} --port ${toString cfg.port} --listen ${cfg.listen} --upstream ${cfg.upstream}";
         Restart = "always";
         RestartSec = "5s";
 

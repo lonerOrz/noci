@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"noci/pkg/log"
 	"noci/pkg/nix"
@@ -55,8 +57,11 @@ func (cf *CommonFlags) Resolve() (OCIConfig, error) {
 	}
 
 	token := os.Getenv("NOCI_TOKEN")
-	if token == "" {
+	if token == "" && os.Getenv("GITHUB_ACTIONS") == "true" {
 		token = os.Getenv("GITHUB_TOKEN")
+	}
+	if token == "" {
+		token = readDockerConfigToken(registry)
 	}
 
 	return OCIConfig{
@@ -64,6 +69,44 @@ func (cf *CommonFlags) Resolve() (OCIConfig, error) {
 		Repo:     repo,
 		Token:    token,
 	}, nil
+}
+
+func readDockerConfigToken(registry string) string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	data, err := os.ReadFile(home + "/.docker/config.json")
+	if err != nil {
+		return ""
+	}
+	var cfg struct {
+		Auths map[string]struct {
+			Auth string `json:"auth"`
+		} `json:"auths"`
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return ""
+	}
+	entry, ok := cfg.Auths[registry]
+	if !ok {
+		entry, ok = cfg.Auths["https://"+registry]
+	}
+	if !ok {
+		entry, ok = cfg.Auths["http://"+registry]
+	}
+	if !ok || entry.Auth == "" {
+		return ""
+	}
+	decoded, err := base64.StdEncoding.DecodeString(entry.Auth)
+	if err != nil {
+		return ""
+	}
+	parts := strings.SplitN(string(decoded), ":", 2)
+	if len(parts) != 2 {
+		return ""
+	}
+	return parts[1]
 }
 
 // resolveHashes 统一解析输入。原生兼容 32 位 Nix 纯哈希、Nix Store 绝对路径以及 Flake 构建目标。

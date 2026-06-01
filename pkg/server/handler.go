@@ -65,7 +65,7 @@ func (s *Server) handleNarInfo(w http.ResponseWriter, r *http.Request, hash stri
 	}
 
 	if val, exists := s.negCache.Load(hash); exists {
-		if time.Since(val.(time.Time)) <= time.Duration(s.ttl)*time.Second {
+		if time.Since(val.(time.Time)) <= 300*time.Second {
 			s.proxyToUpstream(w, r, hash+".narinfo")
 			return
 		}
