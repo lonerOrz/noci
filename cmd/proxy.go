@@ -39,7 +39,6 @@ func runProxy(cmd *cobra.Command, args []string) error {
 	addr := proxyListen + ":" + strconv.Itoa(proxyPort)
 	srv := server.NewServer(cfg.Registry, cfg.Repo, cfg.Token, addr, proxyUpstream)
 
-	log.Action("Starting proxy on http://%s", addr)
-	log.Action("Target OCI repository: %s/%s", cfg.Registry, cfg.Repo)
+	log.Info("Target OCI repository: %s/%s", cfg.Registry, cfg.Repo)
 	return srv.Start(ctx)
 }

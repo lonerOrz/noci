@@ -14,12 +14,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Create and Push Tag
+        with:
+          fetch-depth: 0
+      - name: Force Overwrite Tag
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git tag -d ${{ github.event.inputs.version }} || true
+          git push origin --delete ${{ github.event.inputs.version }} || true
+
+          gh release delete ${{ github.event.inputs.version }} --cleanup-tag --yes || true
+
           git tag ${{ github.event.inputs.version }}
           git push origin ${{ github.event.inputs.version }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   build:
     needs: tag
@@ -46,24 +56,25 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - name: Download Artifacts
+        uses: actions/download-artifact@v4
         with:
           path: artifacts
+          merge-multiple: true
       - name: Create Release
-        id: create_release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.version }}
-          files: artifacts/**/*
+          files: artifacts/*
 
   rollback:
     needs: [tag, build, release]
     runs-on: ubuntu-latest
     if: failure()
     steps:
-      - name: Rollback Tag
+      - name: Rollback Tag and Release
         run: |
-          git push --delete origin ${{ github.event.inputs.version }} || true
+          git push origin --delete ${{ github.event.inputs.version }} || true
           gh release delete ${{ github.event.inputs.version }} --cleanup-tag --yes || true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

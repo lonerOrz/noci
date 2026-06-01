@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -60,8 +61,12 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("/", s.HandleRoutes)
 
 	srv := &http.Server{
-		Addr:    s.addr,
 		Handler: mux,
+	}
+
+	listener, err := net.Listen("tcp", s.addr)
+	if err != nil {
+		return err
 	}
 
 	go func() {
@@ -72,8 +77,8 @@ func (s *Server) Start(ctx context.Context) error {
 		_ = srv.Shutdown(shutdownCtx)
 	}()
 
-	log.Success("Proxy running on http://%s", s.addr)
-	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
+	log.Success("Proxy running on http://%s", listener.Addr().String())
+	if err := srv.Serve(listener); err != http.ErrServerClosed {
 		return err
 	}
 	return nil

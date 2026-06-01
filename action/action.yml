@@ -1,0 +1,39 @@
+name: "noci-cache"
+description: "Zero-config, high-performance Nix binary cache over OCI (push when signing key provided, fetch-only otherwise)"
+author: "lonerOrz"
+inputs:
+  registry:
+    description: "OCI registry endpoint"
+    required: false
+    default: "ghcr.io"
+  repo:
+    description: "OCI repository (e.g. owner/repo). If empty, inferred from GITHUB_REPOSITORY."
+    required: false
+    default: ""
+  token:
+    description: "Registry token (required for push). If empty, uses GITHUB_TOKEN."
+    required: false
+    default: ""
+  signing-key:
+    description: "Raw Nix signing key content (key_name:base64). If empty, switches to Fetch-only mode."
+    required: false
+    default: ""
+  skip-upstream:
+    description: "Skip pushing packages that already carry an upstream signature."
+    required: false
+    default: "true"
+  proxy-port:
+    description: "Port for the local noci proxy (0 = bind to random free port)."
+    required: false
+    default: "0"
+
+outputs:
+  proxy-url:
+    description: "HTTP address of the local noci proxy"
+  pushed-count:
+    description: "Number of store paths pushed to the OCI registry"
+
+runs:
+  using: "node20"
+  main: "src/index.js"
+  post: "src/post.js"
