@@ -4,8 +4,8 @@ noci (Nix over OCI) is a stateless Nix binary cache toolchain. It utilizes stand
 
 ## Features
 
-- **push**: Parses Nix Flake or Store paths, calculates dependency closures, automatically filters out public packages already existing upstream (e.g., cache.nixos.org), and compresses, signs, and pushes private packages to OCI.
-- **proxy**: Provides a local HTTP proxy service compliant with the Nix Substituter protocol, transparently converting Nix fetch requests into OCI layer downloads, with built-in access tracking and debounce mechanisms.
+- **push**: Parses Nix Flake or Store paths, calculates dependency closures, automatically filters out packages that already exist in the OCI cache or carry an upstream `cache.nixos.org-1:` signature (indicating they are public upstream packages), and compresses, signs, and pushes remaining private packages to OCI.
+- **proxy**: Provides a local HTTP proxy service compliant with the Nix Substituter protocol, transparently converting Nix fetch requests into OCI layer downloads. Features an in-memory tag cache with lazy refresh and TTL, a negative cache for 404 suppression, and a fallback upstream proxy to the official Nix cache.
 - **gc**: In-memory dependency directed graph coloring (Mark-Sweep) for garbage collection. Supports evicting cold data based on storage limits (Max-Size) and Least Recently Used (LRU) algorithms, featuring grace period protection against race conditions.
 - **pin/unpin**: Manually manages cache lifelines (GC Roots) with Time-To-Live (TTL) support, protecting critical environment data from accidental deletion by the garbage collector.
 
@@ -13,8 +13,10 @@ noci (Nix over OCI) is a stateless Nix binary cache toolchain. It utilizes stand
 
 noci adopts a completely stateless design, eliminating the need for external databases like Postgres or Redis:
 
-1. **Metadata Storage**: All package hashes, signatures, dependency references, and timestamps are serialized into an extremely compact `cache-index` JSON and pushed to OCI as a pseudo-layer.
-2. **Concurrency Control**: The proxy server backend uses Optimistic Concurrency Control (OCC) to merge access heat updates, preventing lost updates in distributed environments.
+1. **Metadata Storage**: Each cached Nix package is stored as an OCI manifest tagged by its 32-character hash. All metadata (narinfo, dependency references, timestamps, pin state, GC eviction markers) is stored as **annotations** on the individual manifest — no standalone index blob. The logical `CacheIndex` is **reconstructed on-the-fly** by listing all OCI tags and aggregating their annotations at runtime. Push/Pin/GC operations reconcile the index back by updating annotations on the relevant manifests.
+
+2. **GC Concurrency Safety**: The garbage collector follows a read-only analysis + apply pattern: it fetches the full index from OCI, performs Mark-Sweep coloring entirely in memory (`Sweep`), and only mutates the index in a separate `Apply` phase before pushing the updated state back. This avoids in-place mutation of remote state.
+
 3. **Process Management**: Deeply integrates with the Go Context lifecycle, supporting graceful shutdown by catching signals like SIGINT to ensure I/O safety.
 
 ## Advantages
@@ -25,7 +27,7 @@ noci adopts a completely stateless design, eliminating the need for external dat
 
 ## Areas for Improvement
 
-- Support concurrent multi-task Blob uploads using Goroutines to improve outbound network utilization.
+- Increase blob upload concurrency beyond the current hardcoded limit of 4 goroutines, or make it configurable.
 - Introduce Zstd compression support (currently uses Gzip only).
 - Abstract the storage layer into interfaces for future extension to native AWS S3 or other storage backends.
 
@@ -122,7 +124,7 @@ On the machine where you want to use the cache:
 1. Start the local proxy service:
 
 ```bash
-noci proxy --port 8080 --repo "your-username/your-cache-repo" &
+noci proxy --port 8080 --repo "your-username/your-cache-repo" --listen "127.0.0.1" --upstream "https://cache.nixos.org" --ttl 300 &
 ```
 
 2. Use with Nix commands (can also be permanently configured in `/etc/nix/nix.conf`):
