@@ -39,3 +39,8 @@ noci-config-*.json
 .vscode/
 *.swp
 *~
+
+# Vercel
+.vercel
+.env
+.env*
