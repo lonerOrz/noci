@@ -17,9 +17,10 @@ type Publisher struct {
 	client       *oci.Client
 	signer       *nix.Signer
 	skipUpstream bool
+	comp         string
 }
 
-func NewPublisher(client *oci.Client, signer *nix.Signer, skipUpstream bool) *Publisher {
+func NewPublisher(client *oci.Client, signer *nix.Signer, skipUpstream bool, comp string) *Publisher {
 	if client == nil || signer == nil {
 		panic("publisher: client and signer must not be nil")
 	}
@@ -27,6 +28,7 @@ func NewPublisher(client *oci.Client, signer *nix.Signer, skipUpstream bool) *Pu
 		client:       client,
 		signer:       signer,
 		skipUpstream: skipUpstream,
+		comp:         comp,
 	}
 }
 
@@ -149,6 +151,10 @@ func (p *Publisher) Publish(ctx context.Context, inputPaths []string) error {
 				return
 			}
 
+			layerMediaType := "application/vnd.nix.cache.layer.v1+tar+gzip"
+			if p.comp == "zstd" {
+				layerMediaType = "application/vnd.nix.cache.layer.v1+tar+zstd"
+			}
 			manifest := oci.OCIManifest{
 				SchemaVersion: 2,
 				MediaType:     "application/vnd.oci.image.manifest.v1+json",
@@ -159,7 +165,7 @@ func (p *Publisher) Publish(ctx context.Context, inputPaths []string) error {
 				},
 				Layers: []oci.Descriptor{
 					{
-						MediaType: "application/vnd.nix.cache.layer.v1+tar+gzip",
+						MediaType: layerMediaType,
 						Digest:    res.digest,
 						Size:      res.size,
 					},
@@ -206,7 +212,7 @@ func (p *Publisher) Publish(ctx context.Context, inputPaths []string) error {
 func (p *Publisher) publishSingle(ctx context.Context, info nix.PathInfo) (uploadResult, error) {
 	log.Action("Processing: %s", info.Path)
 
-	narFile, fileHash, fileSize, err := nix.ExportAndCompress(ctx, info.Path)
+	narFile, fileHash, fileSize, err := nix.ExportAndCompress(ctx, info.Path, p.comp)
 	if err != nil {
 		return uploadResult{}, fmt.Errorf("export failed: %w", err)
 	}
@@ -232,7 +238,7 @@ func (p *Publisher) publishSingle(ctx context.Context, info nix.PathInfo) (uploa
 		sigs = append(sigs, sig)
 	}
 
-	narinfoContent := nix.GenerateNarInfo(info.Path, normalizedNarHash, info.NarSize, fileHash, fileSize, info.References, sigs)
+	narinfoContent := nix.GenerateNarInfo(info.Path, normalizedNarHash, info.NarSize, fileHash, fileSize, info.References, sigs, p.comp)
 	hash := nix.GetPathHash(info.Path)
 
 	return uploadResult{

@@ -4,7 +4,7 @@ noci (Nix over OCI) is a stateless Nix binary cache toolchain. It utilizes stand
 
 ## Features
 
-- **push**: Parses Nix Flake or Store paths, calculates dependency closures, automatically filters out packages that already exist in the OCI cache or carry an upstream `cache.nixos.org-1:` signature (indicating they are public upstream packages), and compresses, signs, and pushes remaining private packages to OCI. Use `--skip-upstream` to disable upstream-signature filtering and mirror all packages including public ones.
+- **push**: Parses Nix Flake or Store paths, calculates dependency closures, automatically filters out packages that already exist in the OCI cache or carry an upstream `cache.nixos.org-1:` signature (indicating they are public upstream packages), and compresses, signs, and pushes remaining private packages to OCI. Default compression is Zstd (fastest); use `--compression gzip` (or `-c gzip`) for Gzip. Use `--skip-upstream` to disable upstream-signature filtering and mirror all packages including public ones.
 - **proxy**: Provides a local HTTP proxy service compliant with the Nix Substituter protocol, transparently converting Nix fetch requests into OCI layer downloads. Features an in-memory tag cache with lazy refresh and TTL, a negative cache for 404 suppression, and a fallback upstream proxy to the official Nix cache.
 - **gc**: In-memory dependency directed graph coloring (Mark-Sweep) for garbage collection. Supports evicting cold data based on storage limits (Max-Size) and Least Recently Used (LRU) algorithms, featuring grace period protection against race conditions.
 - **pin/unpin**: Manually manages cache lifelines (GC Roots) with Time-To-Live (TTL) support, protecting critical environment data from accidental deletion by the garbage collector.
@@ -28,7 +28,7 @@ noci adopts a completely stateless design, eliminating the need for external dat
 ## Areas for Improvement
 
 - Make the upload worker pool size configurable (currently hardcoded to 4 goroutines for blob+manifest concurrent push).
-- Introduce Zstd compression support (currently uses Gzip only).
+- Add Zstd decompression-only proxy fallback for Nix clients lacking native Zstd support.
 - Abstract the storage layer into interfaces for future extension to native AWS S3 or other storage backends.
 
 ## Installation
@@ -79,8 +79,11 @@ export GITHUB_TOKEN="ghp_your_token"
 **Daily Operations:**
 
 ```bash
-# Push packages to the cache
+# Push packages to the cache (default compression: zstd)
 noci push .#package
+
+# Push with gzip compression for wider client compatibility
+noci push .#package --compression gzip
 
 # Pin a version for 30 days, exempt from GC
 noci pin .#package --ttl 30d

@@ -8,7 +8,7 @@ buildGoModule {
   version = "1.0.0";
   src = ../.;
 
-  vendorHash = "sha256-eKeUhS2puz6ALb+cQKl7+DGvm9Cl+miZAHX0imf9wdg=";
+  vendorHash = "sha256-TIoBh/dd2woCkRpgngkn2rVIzsWTIt1m9wc2IXLvLiM=";
 
   env.CGO_ENABLED = 0;
   ldflags = [

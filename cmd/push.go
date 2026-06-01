@@ -15,8 +15,9 @@ import (
 )
 
 var (
-	pushFlags       CommonFlags
-	pushKeyFile     string
+	pushFlags        CommonFlags
+	pushKeyFile      string
+	pushCompression  string
 	pushSkipUpstream bool
 )
 
@@ -29,6 +30,7 @@ var pushCmd = &cobra.Command{
 func init() {
 	pushFlags.Register(pushCmd)
 	pushCmd.Flags().StringVar(&pushKeyFile, "key-file", "", "Nix private signing key file (optional)")
+	pushCmd.Flags().StringVarP(&pushCompression, "compression", "c", "zstd", "Compression algorithm (zstd, gzip)")
 	pushCmd.Flags().BoolVar(&pushSkipUpstream, "skip-upstream", true, "Skip pushing packages that carry an upstream cache.nixos.org signature")
 }
 
@@ -111,8 +113,13 @@ func runPush(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("no paths or targets provided via arguments or stdin")
 	}
 
+	comp := strings.ToLower(strings.TrimSpace(pushCompression))
+	if comp != "zstd" && comp != "gzip" {
+		return fmt.Errorf("unsupported compression: %q (use 'zstd' or 'gzip')", pushCompression)
+	}
+
 	client := oci.NewClient(cfg.Registry, cfg.Repo, cfg.Token)
-	pub := publisher.NewPublisher(client, signer, pushSkipUpstream)
+	pub := publisher.NewPublisher(client, signer, pushSkipUpstream, comp)
 
 	return pub.Publish(ctx, inputPaths)
 }

@@ -12,11 +12,18 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/klauspost/compress/zstd"
 )
 
-// ExportAndCompress 流式将 nix-store 导出并采用 Gzip 进行高效压缩 (Context-Aware)
-func ExportAndCompress(ctx context.Context, storePath string) (tempFile string, fileHash string, fileSize int64, err error) {
-	tmp, err := os.CreateTemp("", "noci-nar-*.nar.gz")
+// ExportAndCompress 流式将 nix-store 导出并动态选择压缩算法 (Context-Aware)
+func ExportAndCompress(ctx context.Context, storePath string, comp string) (tempFile string, fileHash string, fileSize int64, err error) {
+	ext := ".nar.gz"
+	if comp == "zstd" {
+		ext = ".nar.zst"
+	}
+
+	tmp, err := os.CreateTemp("", "noci-nar-*"+ext)
 	if err != nil {
 		return "", "", 0, err
 	}
@@ -27,17 +34,26 @@ func ExportAndCompress(ctx context.Context, storePath string) (tempFile string, 
 	hashWriter := sha256.New()
 	multiWriter := io.MultiWriter(bufWriter, hashWriter)
 
-	gzipWriter := gzip.NewWriter(multiWriter)
+	var compressor io.WriteCloser
+	if comp == "zstd" {
+		compressor, err = zstd.NewWriter(multiWriter, zstd.WithEncoderConcurrency(1))
+	} else {
+		compressor = gzip.NewWriter(multiWriter)
+	}
+	if err != nil {
+		_ = os.Remove(tmp.Name())
+		return "", "", 0, err
+	}
 
 	dumpCmd := exec.CommandContext(ctx, "nix-store", "--dump", storePath)
-	dumpCmd.Stdout = gzipWriter
+	dumpCmd.Stdout = compressor
 
 	if err := dumpCmd.Run(); err != nil {
 		_ = os.Remove(tmp.Name())
 		return "", "", 0, fmt.Errorf("nix-store dump failed: %w", err)
 	}
 
-	_ = gzipWriter.Close()
+	_ = compressor.Close()
 	_ = bufWriter.Flush()
 
 	stat, err := tmp.Stat()
@@ -49,7 +65,14 @@ func ExportAndCompress(ctx context.Context, storePath string) (tempFile string, 
 	return tmp.Name(), hex.EncodeToString(hashWriter.Sum(nil)), stat.Size(), nil
 }
 
-func GenerateNarInfo(storePath, narHash string, narSize int64, fileHash string, fileSize int64, refs []string, sigs []string) string {
+func GenerateNarInfo(storePath, narHash string, narSize int64, fileHash string, fileSize int64, refs []string, sigs []string, comp string) string {
+	ext := ".nar.gz"
+	compName := "gzip"
+	if comp == "zstd" {
+		ext = ".nar.zst"
+		compName = "zstd"
+	}
+
 	var refBasenames []string
 	for _, r := range refs {
 		refBasenames = append(refBasenames, filepath.Base(r))
@@ -57,8 +80,8 @@ func GenerateNarInfo(storePath, narHash string, narSize int64, fileHash string, 
 
 	lines := []string{
 		"StorePath: " + storePath,
-		"URL: nar/" + GetPathHash(storePath) + ".nar.gz",
-		"Compression: gzip",
+		"URL: nar/" + GetPathHash(storePath) + ext,
+		"Compression: " + compName,
 		"FileHash: sha256:" + fileHash,
 		"FileSize: " + fmt.Sprintf("%d", fileSize),
 		"NarHash: " + narHash,
