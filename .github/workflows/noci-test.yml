@@ -1,5 +1,6 @@
-name: "Local noci-action Test"
-on: [push]
+name: "noci-action Test"
+on:
+  workflow_dispatch:
 
 jobs:
   test:
