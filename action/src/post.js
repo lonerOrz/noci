@@ -7,20 +7,16 @@ async function run() {
   const proxyPid = utils.getState("proxy-pid");
   const startTime = parseInt(utils.getState("start-time"), 10);
 
-  if (!proxyPid) return;
+  const registry = utils.getState("registry") || "ghcr.io";
+  const repo = utils.getState("repo");
+  const token = utils.getState("token");
+  const signingKey = utils.getState("signing-key");
+  const skipUpstream =
+    utils.getEnvOrInput("NOCI_SKIP_UPSTREAM", "skip-upstream") || "true";
+
+  if (!proxyPid || !repo || !signingKey) return;
 
   try {
-    const signingKey =
-      utils.getEnvOrInput("NOCI_SIGNING_KEY", "signing-key") || "";
-    if (!signingKey) return;
-
-    const token =
-      utils.getEnvOrInput("NOCI_TOKEN", "token") ||
-      process.env.GITHUB_TOKEN ||
-      "";
-    const skipUpstream =
-      utils.getEnvOrInput("NOCI_SKIP_UPSTREAM", "skip-upstream") || "true";
-
     const builtPaths = getBuildOutputs();
     const closurePaths = getClosure(builtPaths);
     const filteredPaths = filterPaths(
@@ -33,13 +29,23 @@ async function run() {
 
     const pushProc = cp.spawnSync(
       "/tmp/noci",
-      ["push", "--skip-upstream", ...filteredPaths],
+      [
+        "push",
+        "--skip-upstream",
+        "--repo",
+        repo,
+        "--registry",
+        registry,
+        ...filteredPaths,
+      ],
       {
         stdio: "inherit",
         env: {
           ...process.env,
           HOME: "/tmp",
           NIX_IGNORE_HOME_DIRECTORY_ERROR: "1",
+          NOCI_REGISTRY: registry,
+          NOCI_REPO: repo,
           NOCI_SIGNING_KEY: signingKey,
           NOCI_TOKEN: token,
           GITHUB_TOKEN: token,
@@ -48,7 +54,8 @@ async function run() {
     );
 
     if (pushProc.status !== 0)
-      throw new Error(`push failed: ${pushProc.status}`);
+      throw new Error(`push failed with exit code: ${pushProc.status}`);
+
     utils.exportOutput("pushed-count", filteredPaths.length.toString());
   } catch (error) {
     utils.fail(error.message);

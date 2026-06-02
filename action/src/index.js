@@ -15,7 +15,7 @@ async function run() {
 
     const registry =
       utils.getEnvOrInput("NOCI_REGISTRY", "registry") || "ghcr.io";
-    let repo =
+    const repo =
       utils.getEnvOrInput("NOCI_REPO", "repo") || process.env.GITHUB_REPOSITORY;
     const token =
       utils.getEnvOrInput("NOCI_TOKEN", "token") ||
@@ -29,6 +29,11 @@ async function run() {
       utils.getEnvOrInput("NOCI_PROXY_PORT", "proxy-port") || "0";
 
     if (!repo) throw new Error("Repository is required.");
+
+    utils.saveState("registry", registry);
+    utils.saveState("repo", repo);
+    utils.saveState("token", token);
+    utils.saveState("signing-key", signingKey);
 
     process.env.NOCI_REGISTRY = registry;
     process.env.NOCI_REPO = repo;
