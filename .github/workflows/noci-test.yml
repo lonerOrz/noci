@@ -1,0 +1,23 @@
+name: "Local noci-action Test"
+on: [push]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v30
+
+      - name: Setup noci binary cache
+        uses: ./action
+        with:
+          repo: ${{ secrets.NOCI_REPO }}
+          signing-key: ${{ secrets.NOCI_SIGNING_KEY }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build Flake Target
+        run: |
+          nix build github:lonerOrz/loneros-nur#wooz -L

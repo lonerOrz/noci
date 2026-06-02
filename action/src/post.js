@@ -1,38 +1,57 @@
 const cp = require("child_process");
 const fs = require("fs");
+const path = require("path");
+const utils = require("./utils");
 
 async function run() {
-  const proxyPid = getState("proxy-pid");
-  const startTime = parseInt(getState("start-time"), 10);
+  const proxyPid = utils.getState("proxy-pid");
+  const startTime = parseInt(utils.getState("start-time"), 10);
 
   if (!proxyPid) return;
 
   try {
-    const signingKey = process.env.NOCI_SIGNING_KEY || "";
+    const signingKey =
+      utils.getEnvOrInput("NOCI_SIGNING_KEY", "signing-key") || "";
     if (!signingKey) return;
 
-    console.log("[noci-action] Scanning built paths...");
-    const builtPaths = queryIncrementalPaths(startTime);
-    if (builtPaths.length === 0) return;
+    const token =
+      utils.getEnvOrInput("NOCI_TOKEN", "token") ||
+      process.env.GITHUB_TOKEN ||
+      "";
+    const skipUpstream =
+      utils.getEnvOrInput("NOCI_SKIP_UPSTREAM", "skip-upstream") || "true";
+
+    const builtPaths = getBuildOutputs();
+    const closurePaths = getClosure(builtPaths);
+    const filteredPaths = filterPaths(
+      closurePaths,
+      startTime,
+      skipUpstream === "true",
+    );
+
+    if (filteredPaths.length === 0) return;
 
     const pushProc = cp.spawnSync(
       "/tmp/noci",
-      ["push", "--skip-upstream", ...builtPaths],
+      ["push", "--skip-upstream", ...filteredPaths],
       {
         stdio: "inherit",
         env: {
           ...process.env,
           HOME: "/tmp",
           NIX_IGNORE_HOME_DIRECTORY_ERROR: "1",
+          NOCI_SIGNING_KEY: signingKey,
+          NOCI_TOKEN: token,
+          GITHUB_TOKEN: token,
         },
       },
     );
 
     if (pushProc.status !== 0)
       throw new Error(`push failed: ${pushProc.status}`);
-    exportOutput("pushed-count", builtPaths.length.toString());
+    utils.exportOutput("pushed-count", filteredPaths.length.toString());
   } catch (error) {
-    fail(error.message);
+    utils.fail(error.message);
   } finally {
     try {
       process.kill(parseInt(proxyPid, 10), "SIGTERM");
@@ -40,58 +59,47 @@ async function run() {
   }
 }
 
-function queryIncrementalPaths(startTime, skipUpstream) {
-  const out = cp.execSync("nix path-info --all --json", {
+function getBuildOutputs() {
+  const buildResult = path.join(process.env.GITHUB_WORKSPACE || ".", "result");
+  if (!fs.existsSync(buildResult)) return [];
+  return [fs.readlinkSync(buildResult)];
+}
+
+function getClosure(paths) {
+  if (paths.length === 0) return [];
+  return cp
+    .execSync(`nix-store -qR ${paths.join(" ")}`, { encoding: "utf-8" })
+    .trim()
+    .split("\n");
+}
+
+function filterPaths(paths, startTime, skipUpstream) {
+  if (paths.length === 0) return [];
+  const out = cp.execSync(`nix path-info --json --sigs ${paths.join(" ")}`, {
     encoding: "utf-8",
-    maxBuffer: 100 * 1024 * 1024,
-    env: { ...process.env, HOME: "/tmp" },
+    maxBuffer: 50 * 1024 * 1024,
   });
-  const pathsData = JSON.parse(out);
+
+  const infoMap = JSON.parse(out);
   const result = [];
-  const filter = (p, info) => {
+  const entries = Array.isArray(infoMap)
+    ? infoMap
+    : Object.keys(infoMap).map((k) => ({ path: k, ...infoMap[k] }));
+
+  entries.forEach((info) => {
+    const p = info.path;
+    if (!p || typeof p !== "string" || p.endsWith(".drv")) return;
     if (info.registrationTime >= startTime) {
       if (
-        skipUpstream === "true" &&
-        info.signatures &&
-        info.signatures.length > 0
+        skipUpstream &&
+        info.signatures?.some((s) => s.startsWith("cache.nixos.org-1:"))
       )
         return;
       result.push(p);
     }
-  };
-  Array.isArray(pathsData)
-    ? pathsData.forEach((i) => filter(i.path, i))
-    : Object.entries(pathsData).forEach(([p, i]) => filter(p, i));
+  });
+
   return result;
-}
-
-function getExecCommand(subCommand, extraArgs = []) {
-  const localPath = path.join(process.env.GITHUB_WORKSPACE || ".", "noci");
-  if (fs.existsSync(localPath))
-    return { cmd: localPath, args: [subCommand, ...extraArgs] };
-  return {
-    cmd: "nix",
-    args: [
-      "run",
-      "--option",
-      "sandbox",
-      "false",
-      "github:lonerOrz/noci#default",
-      "--",
-      subCommand,
-      ...extraArgs,
-    ],
-  };
-}
-
-function getState(k) {
-  return process.env[`STATE_noci-state-${k}`];
-}
-function getEnvOrInput(e, i) {
-  return process.env[e] || process.env[`INPUT_${i.toUpperCase()}`];
-}
-function exportOutput(k, v) {
-  fs.appendFileSync(process.env.GITHUB_OUTPUT, `${k}=${v}\n`);
 }
 
 run();
