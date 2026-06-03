@@ -57,6 +57,43 @@ func GetClosure(ctx context.Context, paths []string) ([]string, error) {
 	return closure, nil
 }
 
+// GetPathInfos 批量获取多个路径的元数据（单次 nix 调用）
+func GetPathInfos(ctx context.Context, storePaths []string) (map[string]PathInfo, error) {
+	if len(storePaths) == 0 {
+		return nil, nil
+	}
+
+	args := append([]string{"path-info", "--json"}, storePaths...)
+	cmd := exec.CommandContext(ctx, "nix", args...)
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &errOut
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("nix path-info failed: %w, stderr: %s", err, strings.TrimSpace(errOut.String()))
+	}
+
+	var dict map[string]PathInfo
+	if err := json.Unmarshal(out.Bytes(), &dict); err == nil {
+		for path, info := range dict {
+			info.Path = path
+			dict[path] = info
+		}
+		return dict, nil
+	}
+
+	var list []PathInfo
+	if err := json.Unmarshal(out.Bytes(), &list); err == nil {
+		result := make(map[string]PathInfo, len(list))
+		for i := range list {
+			result[list[i].Path] = list[i]
+		}
+		return result, nil
+	}
+
+	return nil, fmt.Errorf("failed to parse nix path-info output: %s", out.String())
+}
+
 // GetPathInfo 使用 nix path-info 读取某个路径的元数据 (Context-Aware)
 func GetPathInfo(ctx context.Context, storePath string) (*PathInfo, error) {
 	cmd := exec.CommandContext(ctx, "nix", "path-info", "--json", storePath)

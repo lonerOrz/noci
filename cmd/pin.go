@@ -9,8 +9,8 @@ import (
 )
 
 var (
-	pinFlags    CommonFlags
-	pinTTL      string
+	pinFlags CommonFlags
+	pinTTL   string
 )
 
 var pinCmd = &cobra.Command{

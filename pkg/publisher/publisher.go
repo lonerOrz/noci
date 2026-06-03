@@ -74,32 +74,48 @@ func (p *Publisher) Publish(ctx context.Context, inputPaths []string) error {
 		return fmt.Errorf("failed to get closure: %w", err)
 	}
 
-	var uploadList []nix.PathInfo
-	skippedUpstreamCount := 0
-
+	var uncachedPaths []string
 	for _, path := range closure {
 		hash := nix.GetPathHash(path)
-
 		if _, exists := index.Entries[hash]; exists {
 			continue
 		}
+		uncachedPaths = append(uncachedPaths, path)
+	}
 
-		info, err := nix.GetPathInfo(ctx, path)
-		if err != nil {
-			return fmt.Errorf("failed to get path info for %s: %w", path, err)
+	if len(uncachedPaths) == 0 {
+		log.Success("All packages are already cached!")
+		return nil
+	}
+
+	infos, err := nix.GetPathInfos(ctx, uncachedPaths)
+	if err != nil {
+		return fmt.Errorf("failed to get path infos: %w", err)
+	}
+
+	var uploadList []nix.PathInfo
+	skippedUpstreamCount := 0
+
+	for _, path := range uncachedPaths {
+		info, ok := infos[path]
+		if !ok {
+			continue
 		}
 
 		if p.skipUpstream {
+			skip := false
 			for _, sig := range info.Signatures {
 				if strings.HasPrefix(sig, "cache.nixos.org-1:") {
 					skippedUpstreamCount++
-					goto nextPath
+					skip = true
+					break
 				}
 			}
+			if skip {
+				continue
+			}
 		}
-
-		uploadList = append(uploadList, *info)
-	nextPath:
+		uploadList = append(uploadList, info)
 	}
 
 	if skippedUpstreamCount > 0 {

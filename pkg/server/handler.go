@@ -5,11 +5,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"noci/pkg/log"
+	"noci/pkg/oci"
 	"strings"
 	"sync"
 	"time"
-	"noci/pkg/log"
-	"noci/pkg/oci"
 )
 
 var bufferPool = sync.Pool{
@@ -205,7 +205,11 @@ func (s *Server) proxyToUpstream(w http.ResponseWriter, r *http.Request, path st
 		}
 	}
 	w.WriteHeader(resp.StatusCode)
-	_, _ = io.Copy(w, resp.Body)
+
+	buf := bufferPool.Get().([]byte)
+	defer bufferPool.Put(buf)
+
+	_, _ = io.CopyBuffer(w, resp.Body, buf)
 }
 
 func isHopByHopHeader(name string) bool {

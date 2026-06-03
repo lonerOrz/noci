@@ -31,13 +31,15 @@ type Descriptor struct {
 }
 
 type Client struct {
-	registry       string
-	repo           string
-	token          string
-	tokenMu        sync.Mutex
-	ociToken       string
-	tokenFetchTime time.Time
-	client         *http.Client
+	registry      string
+	repo          string
+	token         string
+	tokenMu       sync.Mutex
+	ociTokenPull  string
+	pullFetchTime time.Time
+	ociTokenPush  string
+	pushFetchTime time.Time
+	client        *http.Client
 }
 
 func NewClient(registry, repo, token string) *Client {
@@ -46,6 +48,7 @@ func NewClient(registry, repo, token string) *Client {
 	}
 	transport := &http.Transport{
 		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 100,
 		IdleConnTimeout:     90 * time.Second,
 		TLSHandshakeTimeout: 10 * time.Second,
 	}
@@ -60,15 +63,21 @@ func NewClient(registry, repo, token string) *Client {
 	}
 }
 
-func (c *Client) getOciToken(ctx context.Context) (string, error) {
+func (c *Client) getOciToken(ctx context.Context, actions string) (string, error) {
 	c.tokenMu.Lock()
 	defer c.tokenMu.Unlock()
 
-	if c.ociToken != "" && time.Since(c.tokenFetchTime) < 45*time.Minute {
-		return c.ociToken, nil
+	if actions == "pull" {
+		if c.ociTokenPull != "" && time.Since(c.pullFetchTime) < 45*time.Minute {
+			return c.ociTokenPull, nil
+		}
+	} else {
+		if c.ociTokenPush != "" && time.Since(c.pushFetchTime) < 45*time.Minute {
+			return c.ociTokenPush, nil
+		}
 	}
 
-	scope := fmt.Sprintf("repository:%s/nix-cache:pull,push", c.repo)
+	scope := fmt.Sprintf("repository:%s/nix-cache:%s", c.repo, actions)
 	url := fmt.Sprintf("https://%s/token?scope=%s&service=%s", c.registry, scope, c.registry)
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
@@ -88,7 +97,7 @@ func (c *Client) getOciToken(ctx context.Context) (string, error) {
 
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("fetch token failed: HTTP %d, %s", resp.StatusCode, string(bodyBytes))
+		return "", fmt.Errorf("fetch token for %s failed: HTTP %d, %s", actions, resp.StatusCode, string(bodyBytes))
 	}
 
 	var res struct {
@@ -98,13 +107,22 @@ func (c *Client) getOciToken(ctx context.Context) (string, error) {
 		return "", err
 	}
 
-	c.ociToken = res.Token
-	c.tokenFetchTime = time.Now()
-	return c.ociToken, nil
+	if actions == "pull" {
+		c.ociTokenPull = res.Token
+		c.pullFetchTime = time.Now()
+	} else {
+		c.ociTokenPush = res.Token
+		c.pushFetchTime = time.Now()
+	}
+	return res.Token, nil
 }
 
 func (c *Client) Request(ctx context.Context, method, path string, body io.Reader, contentType string) (*http.Response, error) {
-	token, err := c.getOciToken(ctx)
+	actions := "pull"
+	if method != "GET" && method != "HEAD" {
+		actions = "pull,push"
+	}
+	token, err := c.getOciToken(ctx, actions)
 	if err != nil {
 		return nil, err
 	}
@@ -132,7 +150,11 @@ func (c *Client) getTransport() http.RoundTripper {
 }
 
 func (c *Client) RawRequest(ctx context.Context, method, path string, body io.Reader, contentType string) (*http.Response, error) {
-	token, err := c.getOciToken(ctx)
+	actions := "pull"
+	if method != "GET" && method != "HEAD" {
+		actions = "pull,push"
+	}
+	token, err := c.getOciToken(ctx, actions)
 	if err != nil {
 		return nil, err
 	}
@@ -446,7 +468,7 @@ func (c *Client) UploadBlob(ctx context.Context, filePath, sha256Hex string) (st
 		return "", err
 	}
 
-	token, _ := c.getOciToken(ctx)
+	token, _ := c.getOciToken(ctx, "pull,push")
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/octet-stream")
 

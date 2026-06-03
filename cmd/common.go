@@ -57,7 +57,7 @@ func (cf *CommonFlags) Resolve() (OCIConfig, error) {
 	}
 
 	token := os.Getenv("NOCI_TOKEN")
-	if token == "" && os.Getenv("GITHUB_ACTIONS") == "true" {
+	if token == "" {
 		token = os.Getenv("GITHUB_TOKEN")
 	}
 	if token == "" {

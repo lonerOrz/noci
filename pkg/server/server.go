@@ -9,6 +9,7 @@ import (
 	"noci/pkg/log"
 	"noci/pkg/oci"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -22,6 +23,7 @@ type Server struct {
 	negCache      sync.Map
 	lastFetch     time.Time
 	fetchMu       sync.Mutex
+	isFetching    int32
 }
 
 func NewServer(registry, repo, token, addr, upstream string) *Server {
@@ -101,10 +103,25 @@ func (s *Server) RefreshIndex(ctx context.Context) error {
 
 func (s *Server) loadIndexLazy(ctx context.Context) {
 	s.indexMu.RLock()
-	needRefresh := s.index == nil || time.Since(s.lastFetch) > 300*time.Second
+	hasIndex := s.index != nil
+	needRefresh := !hasIndex || time.Since(s.lastFetch) > 300*time.Second
 	s.indexMu.RUnlock()
 
 	if !needRefresh {
+		return
+	}
+
+	if hasIndex {
+		if atomic.CompareAndSwapInt32(&s.isFetching, 0, 1) {
+			go func() {
+				defer atomic.StoreInt32(&s.isFetching, 0)
+				bgCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				if err := s.RefreshIndex(bgCtx); err != nil {
+					log.Warning("Failed to background refresh index: %v", err)
+				}
+			}()
+		}
 		return
 	}
 
@@ -112,10 +129,9 @@ func (s *Server) loadIndexLazy(ctx context.Context) {
 	defer s.fetchMu.Unlock()
 
 	s.indexMu.RLock()
-	needRefresh = s.index == nil || time.Since(s.lastFetch) > 300*time.Second
+	hasIndex = s.index != nil
 	s.indexMu.RUnlock()
-
-	if needRefresh {
+	if !hasIndex {
 		if err := s.RefreshIndex(ctx); err != nil {
 			log.Warning("Failed to lazy load index: %v", err)
 		}
