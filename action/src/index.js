@@ -8,9 +8,6 @@ const utils = require("./utils");
 
 async function run() {
   try {
-    const startTime = Math.floor(Date.now() / 1000) - 2;
-    utils.saveState("start-time", startTime.toString());
-
     const binPath = await prepareBinary();
 
     const registry =
@@ -68,6 +65,9 @@ async function run() {
         `extra-substituters = ${proxyUrl}\nextra-trusted-public-keys = ${pubKey}\nfallback = true`,
       );
     }
+
+    const startTime = Math.floor(Date.now() / 1000) - 2;
+    utils.saveState("start-time", startTime.toString());
   } catch (error) {
     utils.fail(error.message);
   }
