@@ -77,17 +77,21 @@ async function prepareBinary() {
   const target = "/tmp/noci";
   if (fs.existsSync(target)) return target;
 
-  const version = process.env.GITHUB_ACTION_REF || "v1.0.0";
+  const version = process.env.GITHUB_ACTION_REF;
   const repo = process.env.GITHUB_ACTION_REPOSITORY || "lonerOrz/noci";
   const platform = os.platform();
   const arch = os.arch() === "x64" ? "amd64" : "arm64";
-  const releaseUrl = `https://github.com/${repo}/releases/download/${version}/noci-${platform}-${arch}`;
 
-  try {
-    await downloadFile(releaseUrl, target);
-    return target;
-  } catch (err) {
-    console.log(`[noci-action] Binary download failed, building locally...`);
+  if (version) {
+    const releaseUrl = `https://github.com/${repo}/releases/download/${version}/noci-${platform}-${arch}`;
+    try {
+      await downloadFile(releaseUrl, target);
+      return target;
+    } catch (err) {
+      console.log(`[noci-action] Binary download failed, building locally...`);
+    }
+  } else {
+    console.log(`[noci-action] GITHUB_ACTION_REF is empty, building locally...`);
   }
 
   const actionRoot = path.resolve(__dirname, "../..");
