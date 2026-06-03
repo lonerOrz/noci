@@ -11,13 +11,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/klauspost/compress/zstd"
 )
 
 // ExportAndCompress 流式将 nix-store 导出并动态选择压缩算法 (Context-Aware)
-func ExportAndCompress(ctx context.Context, storePath string, comp string) (tempFile string, fileHash string, fileSize int64, err error) {
+// concurrency: zstd 编码器线程数，<=0 时自动设为 min(4, max(1, NumCPU/2))
+func ExportAndCompress(ctx context.Context, storePath string, comp string, concurrency int) (tempFile string, fileHash string, fileSize int64, err error) {
 	ext := ".nar.gz"
 	if comp == "zstd" {
 		ext = ".nar.zst"
@@ -36,7 +38,15 @@ func ExportAndCompress(ctx context.Context, storePath string, comp string) (temp
 
 	var compressor io.WriteCloser
 	if comp == "zstd" {
-		compressor, err = zstd.NewWriter(multiWriter, zstd.WithEncoderConcurrency(1))
+		if concurrency <= 0 {
+			concurrency = runtime.NumCPU() / 2
+			if concurrency < 1 {
+				concurrency = 1
+			} else if concurrency > 4 {
+				concurrency = 4
+			}
+		}
+		compressor, err = zstd.NewWriter(multiWriter, zstd.WithEncoderConcurrency(concurrency))
 	} else {
 		compressor = gzip.NewWriter(multiWriter)
 	}

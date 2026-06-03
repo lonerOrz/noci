@@ -61,6 +61,9 @@ func (cf *CommonFlags) Resolve() (OCIConfig, error) {
 		token = os.Getenv("GITHUB_TOKEN")
 	}
 	if token == "" {
+		token = os.Getenv("GH_TOKEN")
+	}
+	if token == "" {
 		token = readDockerConfigToken(registry)
 	}
 

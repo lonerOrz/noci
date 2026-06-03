@@ -128,18 +128,16 @@ func (c *Client) Request(ctx context.Context, method, path string, body io.Reade
 	}
 
 	url := fmt.Sprintf("https://%s/v2/%s/nix-cache%s", c.registry, c.repo, path)
-	req, err := http.NewRequestWithContext(ctx, method, url, body)
-	if err != nil {
-		return nil, err
+
+	var bodyBytes []byte
+	if body != nil {
+		bodyBytes, err = io.ReadAll(body)
+		if err != nil {
+			return nil, err
+		}
 	}
 
-	req.Header.Set("Authorization", "Bearer "+token)
-	if contentType != "" {
-		req.Header.Set("Content-Type", contentType)
-		req.Header.Set("Accept", contentType)
-	}
-
-	return c.client.Do(req)
+	return c.doWithRetry(ctx, method, url, token, contentType, bodyBytes, c.client.Do)
 }
 
 func (c *Client) getTransport() http.RoundTripper {
@@ -160,18 +158,61 @@ func (c *Client) RawRequest(ctx context.Context, method, path string, body io.Re
 	}
 
 	url := fmt.Sprintf("https://%s/v2/%s/nix-cache%s", c.registry, c.repo, path)
-	req, err := http.NewRequestWithContext(ctx, method, url, body)
-	if err != nil {
-		return nil, err
+
+	var bodyBytes []byte
+	if body != nil {
+		bodyBytes, err = io.ReadAll(body)
+		if err != nil {
+			return nil, err
+		}
 	}
 
-	req.Header.Set("Authorization", "Bearer "+token)
-	if contentType != "" {
-		req.Header.Set("Content-Type", contentType)
-		req.Header.Set("Accept", contentType)
-	}
+	return c.doWithRetry(ctx, method, url, token, contentType, bodyBytes, c.getTransport().RoundTrip)
+}
 
-	return c.getTransport().RoundTrip(req)
+func (c *Client) doWithRetry(ctx context.Context, method, url, token, contentType string, body []byte, doer func(*http.Request) (*http.Response, error)) (*http.Response, error) {
+	const maxRetries = 3
+	var resp *http.Response
+	var err error
+	backoff := time.Second
+
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+
+		var req *http.Request
+		var reader io.Reader
+		if body != nil {
+			reader = bytes.NewReader(body)
+		}
+		req, err = http.NewRequestWithContext(ctx, method, url, reader)
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("Authorization", "Bearer "+token)
+		if contentType != "" {
+			req.Header.Set("Content-Type", contentType)
+			req.Header.Set("Accept", contentType)
+		}
+
+		resp, err = doer(req)
+		if err == nil {
+			if resp.StatusCode < 500 {
+				return resp, nil
+			}
+			resp.Body.Close()
+		}
+
+		if attempt < maxRetries {
+			time.Sleep(backoff)
+			backoff *= 2
+		}
+	}
+	return resp, err
 }
 
 func (c *Client) FetchManifest(ctx context.Context, tag string) (*OCIManifest, error) {
@@ -463,7 +504,10 @@ func (c *Client) UploadBlob(ctx context.Context, filePath, sha256Hex string) (st
 	}
 	defer file.Close()
 
-	req, err := http.NewRequestWithContext(ctx, "PUT", uploadURL, file)
+	stat, _ := file.Stat()
+
+	pr := &progressReader{r: file, total: stat.Size()}
+	req, err := http.NewRequestWithContext(ctx, "PUT", uploadURL, pr)
 	if err != nil {
 		return "", err
 	}
@@ -472,20 +516,22 @@ func (c *Client) UploadBlob(ctx context.Context, filePath, sha256Hex string) (st
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/octet-stream")
 
-	stat, _ := file.Stat()
 	req.ContentLength = stat.Size()
 
 	putResp, err := c.client.Do(req)
 	if err != nil {
+		fmt.Println()
 		return "", err
 	}
 	defer putResp.Body.Close()
 
 	if putResp.StatusCode != http.StatusCreated && putResp.StatusCode != http.StatusAccepted {
+		fmt.Println()
 		bodyBytes, _ := io.ReadAll(putResp.Body)
 		return "", fmt.Errorf("failed to complete upload: HTTP %d, %s", putResp.StatusCode, string(bodyBytes))
 	}
 
+	fmt.Print("\n  Done.\n")
 	return digest, nil
 }
 
@@ -513,4 +559,33 @@ func (c *Client) DeleteBlob(ctx context.Context, digest string) error {
 		return fmt.Errorf("failed to delete blob %s (HTTP %d): %s", digest, resp.StatusCode, string(bodyBytes))
 	}
 	return nil
+}
+
+type progressReader struct {
+	r     io.Reader
+	total int64
+	done  int64
+}
+
+func (pr *progressReader) Read(p []byte) (int, error) {
+	n, err := pr.r.Read(p)
+	pr.done += int64(n)
+	if pr.total > 0 {
+		pct := float64(pr.done) * 100 / float64(pr.total)
+		fmt.Printf("\r  Uploading... %.1f%% (%s / %s)", pct, formatSize(pr.done), formatSize(pr.total))
+	}
+	return n, err
+}
+
+func formatSize(b int64) string {
+	const unit = 1024
+	if b < unit {
+		return fmt.Sprintf("%d B", b)
+	}
+	div, exp := int64(unit), 0
+	for n := b / unit; n >= unit; exp++ {
+		n /= unit
+		div *= unit
+	}
+	return fmt.Sprintf("%.1f %cB", float64(b)/float64(div), "KMGTPE"[exp])
 }
