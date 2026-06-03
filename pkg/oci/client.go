@@ -2,6 +2,7 @@ package oci
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -14,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/klauspost/compress/zstd"
 )
 
 type OCIManifest struct {
@@ -403,6 +406,30 @@ func (c *Client) FetchIndex(ctx context.Context) (*CacheIndex, error) {
 		return nil, err
 	}
 
+	if len(data) >= 4 && data[0] == 0x28 && data[1] == 0xB5 && data[2] == 0x2F && data[3] == 0xFD {
+		dec, err := zstd.NewReader(nil)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create zstd reader: %w", err)
+		}
+		decoded, err := dec.DecodeAll(data, nil)
+		dec.Close()
+		if err != nil {
+			return nil, fmt.Errorf("failed to decompress zstd index: %w", err)
+		}
+		data = decoded
+	} else if len(data) >= 2 && data[0] == 0x1f && data[1] == 0x8b {
+		gr, err := gzip.NewReader(bytes.NewReader(data))
+		if err != nil {
+			return nil, fmt.Errorf("failed to create gzip reader for index: %w", err)
+		}
+		decoded, err := io.ReadAll(gr)
+		gr.Close()
+		if err != nil {
+			return nil, fmt.Errorf("failed to decompress gzip index: %w", err)
+		}
+		data = decoded
+	}
+
 	var idx CacheIndex
 	if err := json.Unmarshal(data, &idx); err != nil {
 		return nil, err
@@ -418,14 +445,21 @@ func (c *Client) PushIndex(ctx context.Context, idx *CacheIndex) error {
 		return err
 	}
 
-	tmp, err := os.CreateTemp("", "noci-index-*.json")
+	enc, err := zstd.NewWriter(nil, zstd.WithEncoderConcurrency(1))
+	if err != nil {
+		return err
+	}
+	compressed := enc.EncodeAll(data, nil)
+	enc.Close()
+
+	tmp, err := os.CreateTemp("", "noci-index-*.zst")
 	if err != nil {
 		return err
 	}
 	defer os.Remove(tmp.Name())
 
 	h := sha256.New()
-	if _, err := io.Copy(io.MultiWriter(tmp, h), bytes.NewReader(data)); err != nil {
+	if _, err := io.Copy(io.MultiWriter(tmp, h), bytes.NewReader(compressed)); err != nil {
 		return err
 	}
 	if err := tmp.Close(); err != nil {
@@ -447,9 +481,9 @@ func (c *Client) PushIndex(ctx context.Context, idx *CacheIndex) error {
 		},
 		Layers: []Descriptor{
 			{
-				MediaType: "application/vnd.noci.index.layer.v1+json",
+				MediaType: "application/vnd.noci.index.layer.v1+zstd",
 				Digest:    digest,
-				Size:      int64(len(data)),
+				Size:      int64(len(compressed)),
 			},
 		},
 		Annotations: map[string]string{
