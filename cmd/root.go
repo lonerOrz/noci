@@ -21,4 +21,5 @@ func ExecuteContext(ctx context.Context) error {
 func init() {
 	RootCmd.AddCommand(pushCmd)
 	RootCmd.AddCommand(proxyCmd)
+	RootCmd.AddCommand(searchCmd)
 }

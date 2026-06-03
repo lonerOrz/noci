@@ -566,7 +566,7 @@ func (c *Client) UploadBlob(ctx context.Context, filePath, sha256Hex, descriptio
 		return "", fmt.Errorf("failed to complete upload: HTTP %d, %s", putResp.StatusCode, string(bodyBytes))
 	}
 
-	fmt.Printf("\r\x1b[K✔ [noci] Uploaded %s (%s).\n", description, formatSize(stat.Size()))
+	fmt.Printf("\r\x1b[K✔ [noci] Uploaded %s (%s).\n", description, FormatSize(stat.Size()))
 	return digest, nil
 }
 
@@ -608,12 +608,12 @@ func (pr *progressReader) Read(p []byte) (int, error) {
 	pr.done += int64(n)
 	if pr.total > 0 {
 		pct := float64(pr.done) * 100 / float64(pr.total)
-		fmt.Printf("\r\x1b[K▶ [noci] Uploading %s... %.1f%% (%s / %s)", pr.description, pct, formatSize(pr.done), formatSize(pr.total))
+		fmt.Printf("\r\x1b[K▶ [noci] Uploading %s... %.1f%% (%s / %s)", pr.description, pct, FormatSize(pr.done), FormatSize(pr.total))
 	}
 	return n, err
 }
 
-func formatSize(b int64) string {
+func FormatSize(b int64) string {
 	const unit = 1024
 	if b < unit {
 		return fmt.Sprintf("%d B", b)
