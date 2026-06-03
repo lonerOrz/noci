@@ -12,6 +12,34 @@ import (
 	"time"
 )
 
+type loggingResponseWriter struct {
+	http.ResponseWriter
+	statusCode   int
+	wroteHeader  bool
+	source       string
+}
+
+func (lrw *loggingResponseWriter) WriteHeader(code int) {
+	if !lrw.wroteHeader {
+		lrw.statusCode = code
+		lrw.wroteHeader = true
+	}
+	lrw.ResponseWriter.WriteHeader(code)
+}
+
+func (lrw *loggingResponseWriter) Write(b []byte) (int, error) {
+	if !lrw.wroteHeader {
+		lrw.WriteHeader(http.StatusOK)
+	}
+	return lrw.ResponseWriter.Write(b)
+}
+
+func setSource(w http.ResponseWriter, source string) {
+	if lrw, ok := w.(*loggingResponseWriter); ok {
+		lrw.source = source
+	}
+}
+
 var bufferPool = sync.Pool{
 	New: func() interface{} {
 		return make([]byte, 32*1024)
@@ -19,25 +47,37 @@ var bufferPool = sync.Pool{
 }
 
 func (s *Server) HandleNixCacheInfo(w http.ResponseWriter, r *http.Request) {
+	setSource(w, "cache")
 	w.Header().Set("Content-Type", "text/x-nix-cache-info")
 	_, _ = w.Write([]byte("StoreDir: /nix/store\nWantMassQuery: 1\nPriority: 40\n"))
 }
 
 func (s *Server) HandleRoutes(w http.ResponseWriter, r *http.Request) {
+	lrw := &loggingResponseWriter{ResponseWriter: w, statusCode: http.StatusNotFound}
+	start := time.Now()
+	defer func() {
+		source := ""
+		if lrw.source != "" {
+			source = fmt.Sprintf(" (%s)", lrw.source)
+		}
+		log.Info("[noci-proxy] %s %s - %d%s (%s)", r.Method, r.URL.Path, lrw.statusCode, source, time.Since(start))
+	}()
+
 	path := strings.TrimPrefix(r.URL.Path, "/")
 
 	switch {
+	case path == "nix-cache-info":
+		s.HandleNixCacheInfo(lrw, r)
 	case path == "public-key":
-		s.handlePublicKey(w, r)
+		s.handlePublicKey(lrw, r)
 	case strings.HasSuffix(path, ".narinfo"):
-		s.handleNarInfo(w, r, strings.TrimSuffix(path, ".narinfo"))
+		s.handleNarInfo(lrw, r, strings.TrimSuffix(path, ".narinfo"))
 	case strings.HasPrefix(path, "nar/"):
-		s.handleNar(w, r, strings.TrimPrefix(path, "nar/"))
+		s.handleNar(lrw, r, strings.TrimPrefix(path, "nar/"))
 	default:
-		http.NotFound(w, r)
+		http.NotFound(lrw, r)
 	}
 }
-
 func (s *Server) handlePublicKey(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	manifest, err := s.client.FetchManifest(ctx, "public-key")
@@ -47,6 +87,7 @@ func (s *Server) handlePublicKey(w http.ResponseWriter, r *http.Request) {
 	if err == nil && manifest.Annotations != nil {
 		pubKey := manifest.Annotations["org.nix.public_key"]
 		if pubKey != "" {
+			setSource(w, "cache")
 			w.Header().Set("Content-Type", "text/plain")
 			_, _ = w.Write([]byte(pubKey + "\n"))
 			return
@@ -60,12 +101,14 @@ func (s *Server) handleNarInfo(w http.ResponseWriter, r *http.Request, hash stri
 	s.loadIndexLazy(ctx)
 
 	if len(hash) != 32 {
+		setSource(w, "upstream")
 		s.proxyToUpstream(w, r, hash+".narinfo")
 		return
 	}
 
 	if val, exists := s.negCache.Load(hash); exists {
 		if time.Since(val.(time.Time)) <= 300*time.Second {
+			setSource(w, "upstream")
 			s.proxyToUpstream(w, r, hash+".narinfo")
 			return
 		}
@@ -82,10 +125,12 @@ func (s *Server) handleNarInfo(w http.ResponseWriter, r *http.Request, hash stri
 
 	if !found {
 		s.negCache.Store(hash, time.Now())
+		setSource(w, "upstream")
 		s.proxyToUpstream(w, r, hash+".narinfo")
 		return
 	}
 
+	setSource(w, "cache")
 	s.serveNarInfo(w, &entry)
 }
 
@@ -120,6 +165,7 @@ func (s *Server) handleNar(w http.ResponseWriter, r *http.Request, filename stri
 	}
 
 	if len(digest) == 64 {
+		setSource(w, "cache")
 		s.streamBlob(w, r, "sha256:"+digest)
 		return
 	}
@@ -134,11 +180,13 @@ func (s *Server) handleNar(w http.ResponseWriter, r *http.Request, filename stri
 		s.indexMu.RUnlock()
 
 		if found {
+			setSource(w, "cache")
 			s.streamBlob(w, r, "sha256:"+entry.NarDigest)
 			return
 		}
 	}
 
+	setSource(w, "upstream")
 	s.proxyToUpstream(w, r, "nar/"+filename)
 }
 

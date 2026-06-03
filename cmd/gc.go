@@ -6,6 +6,7 @@ import (
 	"noci/pkg/log"
 	"noci/pkg/oci"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -81,19 +82,35 @@ func runGC(cmd *cobra.Command, args []string) error {
 	}
 
 	if gcPhysicalSweep {
-		log.Action("Sweeping blobs...")
+		log.Action("Sweeping blobs concurrently (8 workers)...")
+		sem := make(chan struct{}, 8)
+		var wg sync.WaitGroup
+		var warnOnce sync.Once
+
 		for _, key := range result.EvictedKeys {
 			entry := index.Entries[key]
-			log.Action("Deleting blob: %s", key)
-			if err := client.DeleteBlob(ctx, "sha256:"+entry.NarDigest); err != nil {
-				errMsg := err.Error()
-				if strings.Contains(errMsg, "405") || strings.Contains(errMsg, "UNSUPPORTED") {
-					log.Warning("Blob deletion unsupported (405). Skipping.")
-					break
+			sem <- struct{}{}
+			wg.Add(1)
+
+			go func(digest, key string) {
+				defer func() {
+					<-sem
+					wg.Done()
+				}()
+				log.Action("Deleting blob: %s", key)
+				if err := client.DeleteBlob(ctx, "sha256:"+digest); err != nil {
+					errMsg := err.Error()
+					if strings.Contains(errMsg, "405") || strings.Contains(errMsg, "UNSUPPORTED") {
+						warnOnce.Do(func() {
+							log.Warning("Blob deletion unsupported (405). Skipping remaining.")
+						})
+						return
+					}
+					log.Warning("Failed to delete blob sha256:%s: %v", digest, err)
 				}
-				log.Warning("Failed to delete blob sha256:%s: %v", entry.NarDigest, err)
-			}
+			}(entry.NarDigest, key)
 		}
+		wg.Wait()
 	}
 
 	engine.Apply(result)

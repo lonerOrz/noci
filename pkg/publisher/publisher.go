@@ -215,11 +215,17 @@ func (p *Publisher) Publish(ctx context.Context, inputPaths []string) error {
 		return firstErr
 	}
 
-	for res := range outcomeChan {
-		index.AddEntry(res.hash, res.name, res.narinfo, res.digest, res.size, res.refs)
+	// Late Merge: upload 完成后重新拉取最新索引，消除并发冲突风险
+	freshIndex, err := p.client.FetchIndex(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to re-fetch index for late merge: %w", err)
 	}
 
-	if err := p.client.PushIndex(ctx, index); err != nil {
+	for res := range outcomeChan {
+		freshIndex.AddEntry(res.hash, res.name, res.narinfo, res.digest, res.size, res.refs)
+	}
+
+	if err := p.client.PushIndex(ctx, freshIndex); err != nil {
 		return fmt.Errorf("failed to push updated index: %w", err)
 	}
 

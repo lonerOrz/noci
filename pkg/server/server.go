@@ -55,11 +55,14 @@ func (s *Server) Start(ctx context.Context) error {
 	go func() {
 		warmCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		_ = s.RefreshIndex(warmCtx)
+		if err := s.RefreshIndex(warmCtx); err != nil {
+			log.Warning("Cache warm failed: %v", err)
+			return
+		}
+		log.Success("Cache warmed. Package Entries: %d", s.indexCount())
 	}()
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/nix-cache-info", s.HandleNixCacheInfo)
 	mux.HandleFunc("/", s.HandleRoutes)
 
 	srv := &http.Server{
@@ -97,8 +100,16 @@ func (s *Server) RefreshIndex(ctx context.Context) error {
 	s.lastFetch = time.Now()
 	s.indexMu.Unlock()
 
-	log.Success("Cache warmed. Package Entries: %d", len(idx.Entries))
 	return nil
+}
+
+func (s *Server) indexCount() int {
+	s.indexMu.RLock()
+	defer s.indexMu.RUnlock()
+	if s.index == nil {
+		return 0
+	}
+	return len(s.index.Entries)
 }
 
 func (s *Server) loadIndexLazy(ctx context.Context) {
