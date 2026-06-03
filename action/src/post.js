@@ -76,7 +76,7 @@ function getNewPathsStoreScan(skipUpstream) {
   const current = fs.readdirSync("/nix/store");
 
   const diff = current
-    .filter((p) => !initial.has(p))
+    .filter((p) => !initial.has(p) && !p.endsWith(".drv"))
     .map((p) => "/nix/store/" + p);
 
   if (diff.length === 0) return [];
