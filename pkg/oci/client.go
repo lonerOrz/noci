@@ -432,7 +432,7 @@ func (c *Client) PushIndex(ctx context.Context, idx *CacheIndex) error {
 		return err
 	}
 
-	digest, err := c.UploadBlob(ctx, tmp.Name(), hex.EncodeToString(h.Sum(nil)))
+	digest, err := c.UploadBlob(ctx, tmp.Name(), hex.EncodeToString(h.Sum(nil)), "index")
 	if err != nil {
 		return err
 	}
@@ -459,7 +459,7 @@ func (c *Client) PushIndex(ctx context.Context, idx *CacheIndex) error {
 	return c.PushManifest(ctx, "noci-index", &indexManifest)
 }
 
-func (c *Client) UploadBlob(ctx context.Context, filePath, sha256Hex string) (string, error) {
+func (c *Client) UploadBlob(ctx context.Context, filePath, sha256Hex, description string) (string, error) {
 	digest := "sha256:" + sha256Hex
 
 	headResp, err := c.Request(ctx, "HEAD", "/blobs/"+digest, nil, "")
@@ -506,9 +506,10 @@ func (c *Client) UploadBlob(ctx context.Context, filePath, sha256Hex string) (st
 
 	stat, _ := file.Stat()
 
-	pr := &progressReader{r: file, total: stat.Size()}
+	pr := &progressReader{r: file, total: stat.Size(), description: description}
 	req, err := http.NewRequestWithContext(ctx, "PUT", uploadURL, pr)
 	if err != nil {
+		fmt.Println()
 		return "", err
 	}
 
@@ -531,7 +532,7 @@ func (c *Client) UploadBlob(ctx context.Context, filePath, sha256Hex string) (st
 		return "", fmt.Errorf("failed to complete upload: HTTP %d, %s", putResp.StatusCode, string(bodyBytes))
 	}
 
-	fmt.Print("\n  Done.\n")
+	fmt.Printf("\r✔ [noci] Uploaded %s (%s).\n", description, formatSize(stat.Size()))
 	return digest, nil
 }
 
@@ -562,9 +563,10 @@ func (c *Client) DeleteBlob(ctx context.Context, digest string) error {
 }
 
 type progressReader struct {
-	r     io.Reader
-	total int64
-	done  int64
+	r           io.Reader
+	total       int64
+	done        int64
+	description string
 }
 
 func (pr *progressReader) Read(p []byte) (int, error) {
@@ -572,7 +574,7 @@ func (pr *progressReader) Read(p []byte) (int, error) {
 	pr.done += int64(n)
 	if pr.total > 0 {
 		pct := float64(pr.done) * 100 / float64(pr.total)
-		fmt.Printf("\r  Uploading... %.1f%% (%s / %s)", pct, formatSize(pr.done), formatSize(pr.total))
+		fmt.Printf("\r▶ [noci] Uploading %s... %.1f%% (%s / %s)", pr.description, pct, formatSize(pr.done), formatSize(pr.total))
 	}
 	return n, err
 }

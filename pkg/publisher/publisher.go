@@ -242,8 +242,7 @@ func (p *Publisher) publishSingle(ctx context.Context, info nix.PathInfo) (uploa
 	}
 	defer os.Remove(narFile)
 
-	log.Action("Uploading NAR (%d bytes)...", fileSize)
-	digest, err := p.client.UploadBlob(ctx, narFile, fileHash)
+	digest, err := p.client.UploadBlob(ctx, narFile, fileHash, "NAR")
 	if err != nil {
 		return uploadResult{}, fmt.Errorf("upload blob failed: %w", err)
 	}
