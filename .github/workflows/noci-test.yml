@@ -21,4 +21,4 @@ jobs:
 
       - name: Build Flake Target
         run: |
-          nix build github:lonerOrz/loneros-nur#wooz -L
+          nix build github:lonerOrz/loneros-nur#wooz --no-link -L

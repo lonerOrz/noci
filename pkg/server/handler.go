@@ -2,9 +2,11 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"noci/dist"
 	"noci/pkg/log"
 	"noci/pkg/oci"
 	"strings"
@@ -66,6 +68,8 @@ func (s *Server) HandleRoutes(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/")
 
 	switch {
+	case path == "":
+		s.handleDashboard(lrw, r)
 	case path == "nix-cache-info":
 		s.HandleNixCacheInfo(lrw, r)
 	case path == "public-key":
@@ -269,4 +273,21 @@ func isHopByHopHeader(name string) bool {
 		strings.EqualFold(name, "Transfer-Encoding") ||
 		strings.EqualFold(name, "Trailers") ||
 		strings.EqualFold(name, "Upgrade")
+}
+
+func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
+	setSource(w, "cache")
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+
+	s.indexMu.RLock()
+	idxBytes, err := json.Marshal(s.index)
+	s.indexMu.RUnlock()
+
+	if err != nil {
+		http.Error(w, "Failed to marshal index", http.StatusInternalServerError)
+		return
+	}
+
+	html := strings.Replace(dist.IndexHTML, "/* {{.IndexJSON}} */", string(idxBytes), 1)
+	_, _ = w.Write([]byte(html))
 }

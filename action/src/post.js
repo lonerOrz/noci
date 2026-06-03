@@ -1,6 +1,4 @@
 const cp = require("child_process");
-const fs = require("fs");
-const path = require("path");
 const utils = require("./utils");
 
 async function run() {
@@ -17,15 +15,14 @@ async function run() {
   if (!proxyPid || !repo || !signingKey) return;
 
   try {
-    const builtPaths = getBuildOutputs();
-    const closurePaths = getClosure(builtPaths);
-    const filteredPaths = filterPaths(
-      closurePaths,
-      startTime,
-      skipUpstream === "true",
-    );
+    const newPaths = getNewPathsSince(startTime, skipUpstream === "true");
 
-    if (filteredPaths.length === 0) return;
+    if (newPaths.length === 0) {
+      console.log("[noci-action] No new packages built in this job.");
+      return;
+    }
+
+    console.log(`[noci-action] Found ${newPaths.length} new paths to push.`);
 
     const pushProc = cp.spawnSync(
       "/tmp/noci",
@@ -36,7 +33,7 @@ async function run() {
         repo,
         "--registry",
         registry,
-        ...filteredPaths,
+        ...newPaths,
       ],
       {
         stdio: "inherit",
@@ -56,7 +53,7 @@ async function run() {
     if (pushProc.status !== 0)
       throw new Error(`push failed with exit code: ${pushProc.status}`);
 
-    utils.exportOutput("pushed-count", filteredPaths.length.toString());
+    utils.exportOutput("pushed-count", newPaths.length.toString());
   } catch (error) {
     utils.fail(error.message);
   } finally {
@@ -66,46 +63,26 @@ async function run() {
   }
 }
 
-function getBuildOutputs() {
-  const buildResult = path.join(process.env.GITHUB_WORKSPACE || ".", "result");
-  if (!fs.existsSync(buildResult)) return [];
-  return [fs.readlinkSync(buildResult)];
-}
-
-function getClosure(paths) {
-  if (paths.length === 0) return [];
-  return cp
-    .execSync(`nix-store -qR ${paths.join(" ")}`, { encoding: "utf-8" })
-    .trim()
-    .split("\n");
-}
-
-function filterPaths(paths, startTime, skipUpstream) {
-  if (paths.length === 0) return [];
-  const out = cp.execSync(`nix path-info --json --sigs ${paths.join(" ")}`, {
+function getNewPathsSince(startTime, skipUpstream) {
+  const out = cp.execSync(`nix path-info --all --json`, {
     encoding: "utf-8",
-    maxBuffer: 50 * 1024 * 1024,
+    maxBuffer: 100 * 1024 * 1024,
   });
 
   const infoMap = JSON.parse(out);
   const result = [];
-  const entries = Array.isArray(infoMap)
-    ? infoMap
-    : Object.keys(infoMap).map((k) => ({ path: k, ...infoMap[k] }));
 
-  entries.forEach((info) => {
-    const p = info.path;
-    if (!p || typeof p !== "string" || p.endsWith(".drv")) return;
+  for (const [p, info] of Object.entries(infoMap)) {
+    if (!p || p.endsWith(".drv")) continue;
     if (info.registrationTime >= startTime) {
       if (
         skipUpstream &&
         info.signatures?.some((s) => s.startsWith("cache.nixos.org-1:"))
       )
-        return;
+        continue;
       result.push(p);
     }
-  });
-
+  }
   return result;
 }
 
