@@ -58,6 +58,15 @@ func (s *Server) HandleRoutes(w http.ResponseWriter, r *http.Request) {
 	lrw := &loggingResponseWriter{ResponseWriter: w, statusCode: http.StatusNotFound}
 	start := time.Now()
 	defer func() {
+		silentPaths := map[string]bool{
+			"/api/digest":  true,
+			"/app.js":      true,
+			"/style.css":   true,
+			"/favicon.svg": true,
+		}
+		if silentPaths[r.URL.Path] {
+			return
+		}
 		source := ""
 		if lrw.source != "" {
 			source = fmt.Sprintf(" (%s)", lrw.source)
@@ -70,10 +79,20 @@ func (s *Server) HandleRoutes(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case path == "":
 		s.handleDashboard(lrw, r)
+	case path == "app.js":
+		s.handleAppJS(lrw, r)
+	case path == "style.css":
+		s.handleStyleCSS(lrw, r)
+	case path == "favicon.svg":
+		s.handleFavicon(lrw, r)
 	case path == "nix-cache-info":
 		s.HandleNixCacheInfo(lrw, r)
 	case path == "public-key":
 		s.handlePublicKey(lrw, r)
+	case path == "api/digest":
+		s.handleAPIDigest(lrw, r)
+	case path == "api/index":
+		s.handleAPIIndex(lrw, r)
 	case strings.HasSuffix(path, ".narinfo"):
 		s.handleNarInfo(lrw, r, strings.TrimSuffix(path, ".narinfo"))
 	case strings.HasPrefix(path, "nar/"):
@@ -82,6 +101,7 @@ func (s *Server) HandleRoutes(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(lrw, r)
 	}
 }
+
 func (s *Server) handlePublicKey(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	manifest, err := s.client.FetchManifest(ctx, "public-key")
@@ -101,9 +121,6 @@ func (s *Server) handlePublicKey(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleNarInfo(w http.ResponseWriter, r *http.Request, hash string) {
-	ctx := r.Context()
-	s.loadIndexLazy(ctx)
-
 	if len(hash) != 32 {
 		setSource(w, "upstream")
 		s.proxyToUpstream(w, r, hash+".narinfo")
@@ -111,7 +128,7 @@ func (s *Server) handleNarInfo(w http.ResponseWriter, r *http.Request, hash stri
 	}
 
 	if val, exists := s.negCache.Load(hash); exists {
-		if time.Since(val.(time.Time)) <= 300*time.Second {
+		if time.Since(val.(time.Time)) <= 5*time.Second {
 			setSource(w, "upstream")
 			s.proxyToUpstream(w, r, hash+".narinfo")
 			return
@@ -278,16 +295,37 @@ func isHopByHopHeader(name string) bool {
 func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	setSource(w, "cache")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = w.Write([]byte(dist.IndexHTML))
+}
 
+func (s *Server) handleAppJS(w http.ResponseWriter, r *http.Request) {
+	setSource(w, "cache")
+	w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+	_, _ = w.Write([]byte(dist.AppJS))
+}
+
+func (s *Server) handleStyleCSS(w http.ResponseWriter, r *http.Request) {
+	setSource(w, "cache")
+	w.Header().Set("Content-Type", "text/css; charset=utf-8")
+	_, _ = w.Write([]byte(dist.StyleCSS))
+}
+
+func (s *Server) handleFavicon(w http.ResponseWriter, r *http.Request) {
+	setSource(w, "cache")
+	w.Header().Set("Content-Type", "image/svg+xml")
+	_, _ = w.Write(dist.FaviconSVG)
+}
+
+func (s *Server) handleAPIDigest(w http.ResponseWriter, r *http.Request) {
+	setSource(w, "cache")
+	w.Header().Set("Content-Type", "text/plain")
+	_, _ = w.Write([]byte(s.lastDigest))
+}
+
+func (s *Server) handleAPIIndex(w http.ResponseWriter, r *http.Request) {
+	setSource(w, "cache")
+	w.Header().Set("Content-Type", "application/json")
 	s.indexMu.RLock()
-	idxBytes, err := json.Marshal(s.index)
-	s.indexMu.RUnlock()
-
-	if err != nil {
-		http.Error(w, "Failed to marshal index", http.StatusInternalServerError)
-		return
-	}
-
-	html := strings.Replace(dist.IndexHTML, "/* {{.IndexJSON}} */", string(idxBytes), 1)
-	_, _ = w.Write([]byte(html))
+	defer s.indexMu.RUnlock()
+	_ = json.NewEncoder(w).Encode(s.index)
 }

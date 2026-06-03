@@ -8,8 +8,8 @@ import (
 	"net/url"
 	"noci/pkg/log"
 	"noci/pkg/oci"
+	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -22,8 +22,7 @@ type Server struct {
 	index         *oci.CacheIndex
 	negCache      sync.Map
 	lastFetch     time.Time
-	fetchMu       sync.Mutex
-	isFetching    int32
+	lastDigest    string
 }
 
 func NewServer(registry, repo, token, addr, upstream string) *Server {
@@ -52,15 +51,18 @@ func NewServer(registry, repo, token, addr, upstream string) *Server {
 }
 
 func (s *Server) Start(ctx context.Context) error {
-	go func() {
-		warmCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		if err := s.RefreshIndex(warmCtx); err != nil {
-			log.Warning("Cache warm failed: %v", err)
-			return
-		}
-		log.Success("Cache warmed. Package Entries: %d", s.indexCount())
-	}()
+	warmCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	if exists, digest := s.client.ManifestExists(warmCtx, "noci-index"); exists {
+		s.lastDigest = digest
+	}
+	if err := s.RefreshIndex(warmCtx); err != nil {
+		log.Warning("Initial cache warm failed: %v", err)
+	} else {
+		log.Success("Cache warmed. Package Entries: %d, Initial Digest: %s", s.indexCount(), shortDigest(s.lastDigest))
+	}
+	cancel()
+
+	go s.startActiveSyncLoop(ctx, 5*time.Second)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.HandleRoutes)
@@ -112,39 +114,43 @@ func (s *Server) indexCount() int {
 	return len(s.index.Entries)
 }
 
-func (s *Server) loadIndexLazy(ctx context.Context) {
-	s.indexMu.RLock()
-	hasIndex := s.index != nil
-	needRefresh := !hasIndex || time.Since(s.lastFetch) > 300*time.Second
-	s.indexMu.RUnlock()
+func (s *Server) startActiveSyncLoop(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
 
-	if !needRefresh {
-		return
-	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			exists, remoteDigest := s.client.ManifestExists(ctx, "noci-index")
+			if !exists {
+				continue
+			}
 
-	if hasIndex {
-		if atomic.CompareAndSwapInt32(&s.isFetching, 0, 1) {
-			go func() {
-				defer atomic.StoreInt32(&s.isFetching, 0)
-				bgCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-				defer cancel()
-				if err := s.RefreshIndex(bgCtx); err != nil {
-					log.Warning("Failed to background refresh index: %v", err)
+			if remoteDigest != "" && remoteDigest != s.lastDigest {
+				log.Info("Detected remote OCI index update (%s -> %s). Synchronizing...", shortDigest(s.lastDigest), shortDigest(remoteDigest))
+
+				syncCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+				if err := s.RefreshIndex(syncCtx); err != nil {
+					log.Warning("Background sync index failed: %v", err)
+				} else {
+					s.lastDigest = remoteDigest
+					log.Success("OCI index auto-synced successfully. Entries: %d", s.indexCount())
 				}
-			}()
-		}
-		return
-	}
-
-	s.fetchMu.Lock()
-	defer s.fetchMu.Unlock()
-
-	s.indexMu.RLock()
-	hasIndex = s.index != nil
-	s.indexMu.RUnlock()
-	if !hasIndex {
-		if err := s.RefreshIndex(ctx); err != nil {
-			log.Warning("Failed to lazy load index: %v", err)
+				cancel()
+			}
 		}
 	}
+}
+
+func shortDigest(digest string) string {
+	parts := strings.Split(digest, ":")
+	if len(parts) == 2 && len(parts[1]) > 8 {
+		return parts[0] + ":" + parts[1][:8]
+	}
+	if len(digest) > 8 {
+		return digest[:8]
+	}
+	return digest
 }
