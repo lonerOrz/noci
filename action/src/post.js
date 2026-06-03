@@ -1,9 +1,9 @@
 const cp = require("child_process");
+const fs = require("fs");
 const utils = require("./utils");
 
 async function run() {
   const proxyPid = utils.getState("proxy-pid");
-  const startTime = parseInt(utils.getState("start-time"), 10);
 
   const registry = utils.getState("registry") || "ghcr.io";
   const repo = utils.getState("repo");
@@ -15,7 +15,7 @@ async function run() {
   if (!proxyPid || !repo || !signingKey) return;
 
   try {
-    const newPaths = getNewPathsSince(startTime, skipUpstream === "true");
+    const newPaths = getNewPathsStoreScan(skipUpstream === "true");
 
     if (newPaths.length === 0) {
       console.log("[noci-action] No new packages built in this job.");
@@ -63,10 +63,27 @@ async function run() {
   }
 }
 
-function getNewPathsSince(startTime, skipUpstream) {
-  const out = cp.execSync(`nix path-info --all --json`, {
+function getNewPathsStoreScan(skipUpstream) {
+  if (!fs.existsSync("/tmp/noci-initial-store.txt")) {
+    console.log("[noci-action] Initial store snapshot not found. Skipping push.");
+    return [];
+  }
+
+  const initial = new Set(
+    fs.readFileSync("/tmp/noci-initial-store.txt", "utf-8").trim().split("\n"),
+  );
+
+  const current = fs.readdirSync("/nix/store");
+
+  const diff = current
+    .filter((p) => !initial.has(p))
+    .map((p) => "/nix/store/" + p);
+
+  if (diff.length === 0) return [];
+
+  const out = cp.execSync(`nix path-info --json ${diff.join(" ")}`, {
     encoding: "utf-8",
-    maxBuffer: 100 * 1024 * 1024,
+    maxBuffer: 50 * 1024 * 1024,
   });
 
   const infoMap = JSON.parse(out);
@@ -74,14 +91,12 @@ function getNewPathsSince(startTime, skipUpstream) {
 
   for (const [p, info] of Object.entries(infoMap)) {
     if (!p || p.endsWith(".drv")) continue;
-    if (info.registrationTime >= startTime) {
-      if (
-        skipUpstream &&
-        info.signatures?.some((s) => s.startsWith("cache.nixos.org-1:"))
-      )
-        continue;
-      result.push(p);
-    }
+    if (
+      skipUpstream &&
+      info.signatures?.some((s) => s.startsWith("cache.nixos.org-1:"))
+    )
+      continue;
+    result.push(p);
   }
   return result;
 }

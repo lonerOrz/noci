@@ -66,8 +66,8 @@ async function run() {
       );
     }
 
-    const startTime = Math.floor(Date.now() / 1000) - 2;
-    utils.saveState("start-time", startTime.toString());
+    const initialPaths = fs.readdirSync("/nix/store");
+    fs.writeFileSync("/tmp/noci-initial-store.txt", initialPaths.join("\n"));
   } catch (error) {
     utils.fail(error.message);
   }
