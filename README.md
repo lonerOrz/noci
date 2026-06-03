@@ -4,10 +4,11 @@ noci is a stateless Nix binary cache toolchain that leverages standard OCI conta
 
 ## Features
 
-- **push**: Intelligently analyzes dependency closures, automatically filters out existing or upstream-cached packages (supports Zstd/Gzip compression).
-- **proxy**: A local HTTP proxy that transparently converts Nix fetch requests into OCI layer downloads, with support for TTL-based cache refreshing and upstream fallback.
-- **gc**: Performs Mark-Sweep garbage collection on dependencies, supporting storage quotas (Max-Size) and grace-period protection.
-- **pin**: Manually manages cache lifelines to protect critical environments from accidental deletion by the garbage collector.
+- **push**: Intelligently analyzes dependency closures, automatically filters out existing or upstream-cached packages (supports Zstd/Gzip compression, adaptive multi-threaded compression).
+- **proxy**: A local HTTP proxy that transparently converts Nix fetch requests into OCI layer downloads, with support for TTL-based cache refreshing and upstream fallback. Structured request logging provides real-time visibility.
+- **search**: List or fuzzy-search cached packages by name, hash, store path, or Flake URI. Uses `nix eval --raw` for zero-build Flake resolution.
+- **gc**: Performs Mark-Sweep garbage collection on dependencies, supporting storage quotas (Max-Size), grace-period protection, and cascade eviction for targeted removal.
+- **pin/unpin**: Manually manages cache lifelines to protect critical environments from accidental deletion by the garbage collector.
 
 ## Installation
 
@@ -47,17 +48,31 @@ export NOCI_SIGNING_KEY=$(cat secret.key)
 export GH_TOKEN="your_token"
 ```
 
+Token resolution: `NOCI_TOKEN` → `GITHUB_TOKEN` → `GH_TOKEN` → `~/.docker/config.json`.
+
 ### 3. Daily Operations
 
 ```bash
-# Push packages to OCI
+# Push packages to OCI (with 4-thread zstd compression)
+noci push .#package --jobs 4
+
+# Push with default auto-threaded compression (min(4, max(1, NumCPU/2)))
 noci push .#package
 
 # Pin a package for 30 days
 noci pin .#package --ttl 30d
 
-# Run garbage collection (5GB quota)
+# List cached packages
+noci search
+
+# Search by name, hash, store path, or Flake URI
+noci search sonar
+noci search /nix/store/g5jggck6izsllbkrjgh9hr5bwhkpwlgh-sonar-0.4.0
+noci search github:owner/repo#package
+
+# Run garbage collection (5GB quota, cascade evict specific packages)
 noci gc --max-size 5GB --grace-period 6h --dry-run=false
+noci gc g5jggck6... hszsl3vn...   # cascade eviction
 ```
 
 ## GitHub Actions Integration
@@ -89,6 +104,8 @@ jobs:
    ```bash
    noci proxy --repo username/repo --port 8080 &
    ```
+   Each request is logged in real-time: `[noci-proxy] GET /xxx.narinfo - 200 (cache) (2ms)`
+
 2. **Configure Nix:**
    ```bash
    nix build .#package \
