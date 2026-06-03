@@ -21,8 +21,8 @@ var (
 )
 
 var gcCmd = &cobra.Command{
-	Use:   "gc",
-	Short: "Garbage collect orphaned or quota-exceeded packages",
+	Use:   "gc [paths, targets, or 32-char hashes...]",
+	Short: "Garbage collect orphaned, quota-exceeded, or targeted packages",
 	RunE:  runGC,
 }
 
@@ -61,7 +61,18 @@ func runGC(cmd *cobra.Command, args []string) error {
 	}
 
 	engine := gc.NewEngine(index, dur)
-	result := engine.Sweep(time.Now(), maxBytes)
+	var result *gc.Result
+
+	if len(args) > 0 {
+		inputHashes, err := resolveHashes(ctx, args, false)
+		if err != nil {
+			return err
+		}
+		log.Action("Targeted eviction resolved to %d input hashes.", len(inputHashes))
+		result = engine.CascadeEvict(inputHashes)
+	} else {
+		result = engine.Sweep(time.Now(), maxBytes)
+	}
 
 	log.Info("GC Summary:")
 	fmt.Printf("  Live:    %d (%d B)\n", result.OriginalCount, result.OriginalSize)

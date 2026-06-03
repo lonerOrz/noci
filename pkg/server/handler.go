@@ -14,9 +14,9 @@ import (
 
 type loggingResponseWriter struct {
 	http.ResponseWriter
-	statusCode   int
-	wroteHeader  bool
-	source       string
+	statusCode  int
+	wroteHeader bool
+	source      string
 }
 
 func (lrw *loggingResponseWriter) WriteHeader(code int) {

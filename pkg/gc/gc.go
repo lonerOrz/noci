@@ -133,7 +133,7 @@ func (e *Engine) scanClosure(activeRoots []string, markedSet map[string]bool) {
 
 	for len(queue) > 0 {
 		curr := queue[len(queue)-1]
-		queue = queue[:len(queue)-1] // Pop
+		queue = queue[:len(queue)-1]
 
 		if markedSet[curr] {
 			continue
@@ -146,13 +146,68 @@ func (e *Engine) scanClosure(activeRoots []string, markedSet map[string]bool) {
 
 		markedSet[curr] = true
 
-		// 将其依赖推入工作栈
 		for _, ref := range entry.References {
 			refHash := getHashFromPath(ref)
 			if refHash != "" && !markedSet[refHash] {
 				queue = append(queue, refHash)
 			}
 		}
+	}
+}
+
+// CascadeEvict 执行定向级联驱逐：驱逐指定目标及其所有间接依赖的上层包
+func (e *Engine) CascadeEvict(targets []string) *Result {
+	var originalSize int64
+	for _, entry := range e.index.Entries {
+		originalSize += entry.NarSize
+	}
+
+	revDeps := make(map[string][]string)
+	for hash, entry := range e.index.Entries {
+		for _, ref := range entry.References {
+			refHash := getHashFromPath(ref)
+			if refHash != "" {
+				revDeps[refHash] = append(revDeps[refHash], hash)
+			}
+		}
+	}
+
+	evictedSet := make(map[string]bool)
+	queue := append([]string{}, targets...)
+
+	for len(queue) > 0 {
+		curr := queue[0]
+		queue = queue[1:]
+
+		if evictedSet[curr] {
+			continue
+		}
+		if _, exists := e.index.Entries[curr]; !exists {
+			continue
+		}
+		evictedSet[curr] = true
+
+		if deps, ok := revDeps[curr]; ok {
+			queue = append(queue, deps...)
+		}
+	}
+
+	evictedKeys := make([]string, 0, len(evictedSet))
+	var evictedSize int64
+	for hash := range evictedSet {
+		evictedKeys = append(evictedKeys, hash)
+		evictedSize += e.index.Entries[hash].NarSize
+	}
+
+	return &Result{
+		OriginalCount: len(e.index.Entries),
+		OriginalSize:  originalSize,
+		RetainedCount: len(e.index.Entries) - len(evictedKeys),
+		RetainedSize:  originalSize - evictedSize,
+		EvictedCount:  len(evictedKeys),
+		EvictedSize:   evictedSize,
+		EvictedKeys:   evictedKeys,
+		ExpiredRoots:  targets,
 	}
 }
 

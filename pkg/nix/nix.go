@@ -137,6 +137,20 @@ func BuildTarget(ctx context.Context, target string) ([]string, error) {
 	return ParseJSONBuildOutputs(out.Bytes())
 }
 
+// EvalOutPath resolves a Flake installable to its store path via nix eval --raw.
+func EvalOutPath(ctx context.Context, target string) (string, error) {
+	cmd := exec.CommandContext(ctx, "nix", "eval", "--raw", "--extra-experimental-features", "nix-command flakes", target)
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &errOut
+
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("%v: %s", err, strings.TrimSpace(errOut.String()))
+	}
+	return strings.TrimSpace(out.String()), nil
+}
+
 func ParseJSONBuildOutputs(data []byte) ([]string, error) {
 	var buildOutputs []map[string]interface{}
 	if err := json.Unmarshal(data, &buildOutputs); err != nil {

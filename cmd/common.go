@@ -137,7 +137,7 @@ func resolveHashes(ctx context.Context, args []string, allowBuild bool) ([]strin
 			continue
 		}
 
-		// 策略 C: 只有在 pin 等明确允许的情况下，才调用 `nix build`
+		// 策略 C: nix build（允许时）或 nix eval --raw（不允许时）
 		if allowBuild {
 			log.Action("Target %q is not a local store path or raw hash. Evaluating via `nix build`...", arg)
 			buildPaths, err := nix.BuildTarget(ctx, arg)
@@ -151,7 +151,17 @@ func resolveHashes(ctx context.Context, args []string, allowBuild bool) ([]strin
 				}
 			}
 		} else {
-			return nil, fmt.Errorf("target %q is not a valid 32-character Nix hash or store path (building is disabled for this command)", arg)
+			log.Action("Target %q is not a local store path or raw hash. Evaluating via `nix eval`...", arg)
+			outPath, err := nix.EvalOutPath(ctx, arg)
+			if err != nil {
+				return nil, fmt.Errorf("target %q is not a valid Nix hash/path, and evaluation failed: %w", arg, err)
+			}
+			hash := nix.GetPathHash(outPath)
+			if hash != "" {
+				hashes = append(hashes, hash)
+			} else {
+				return nil, fmt.Errorf("target %q evaluated to invalid store path: %s", arg, outPath)
+			}
 		}
 	}
 	return hashes, nil
