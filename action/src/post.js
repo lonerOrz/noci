@@ -58,7 +58,10 @@ async function run() {
     utils.fail(error.message);
   } finally {
     try {
-      process.kill(parseInt(proxyPid, 10), "SIGTERM");
+      const pid = parseInt(proxyPid, 10);
+      if (!isNaN(pid)) {
+        process.kill(pid, "SIGTERM");
+      }
     } catch (e) {}
   }
 }

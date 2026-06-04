@@ -1,5 +1,14 @@
 const fs = require("fs");
 
+function writeMultiline(filePath, key, value) {
+  if (value.includes("\n")) {
+    const delim = "NOCI_EOF";
+    fs.appendFileSync(filePath, `${key}<<${delim}\n${value}\n${delim}\n`);
+  } else {
+    fs.appendFileSync(filePath, `${key}=${value}\n`);
+  }
+}
+
 module.exports = {
   getEnvOrInput(envKey, inputKey) {
     return (
@@ -8,11 +17,11 @@ module.exports = {
   },
 
   saveState(key, value) {
-    fs.appendFileSync(process.env.GITHUB_STATE, `noci-state-${key}=${value}\n`);
+    writeMultiline(process.env.GITHUB_STATE, `noci-state-${key}`, value);
   },
 
   exportVariable(key, value) {
-    fs.appendFileSync(process.env.GITHUB_ENV, `${key}=${value}\n`);
+    writeMultiline(process.env.GITHUB_ENV, key, value);
   },
 
   exportOutput(key, value) {

@@ -119,12 +119,15 @@ async function prepareBinary() {
   return target;
 }
 
-function downloadFile(url, targetPath) {
+function downloadFile(url, targetPath, redirects = 0) {
+  if (redirects > 5) {
+    return Promise.reject(new Error("Too many redirects"));
+  }
   return new Promise((resolve, reject) => {
     https
       .get(url, (res) => {
         if (res.statusCode === 301 || res.statusCode === 302)
-          return downloadFile(res.headers.location, targetPath)
+          return downloadFile(res.headers.location, targetPath, redirects + 1)
             .then(resolve)
             .catch(reject);
         if (res.statusCode !== 200)
@@ -146,7 +149,7 @@ function waitForProxyPort(proc, logPath) {
       if (!fs.existsSync(logPath)) return;
       const output = fs.readFileSync(logPath, "utf8");
       const match = output.match(
-        /Proxy running on http:\/\/\[?[a-zA-Z0-9\.-:]+\]?:([0-9]+)/,
+        /Proxy running on http:\/\/\[?[a-zA-Z0-9.:-]+\]?:([0-9]+)/,
       );
       if (match) {
         clearInterval(interval);
