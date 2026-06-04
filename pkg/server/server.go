@@ -128,14 +128,20 @@ func (s *Server) startActiveSyncLoop(ctx context.Context, interval time.Duration
 				continue
 			}
 
-			if remoteDigest != "" && remoteDigest != s.lastDigest {
-				log.Info("Detected remote OCI index update (%s -> %s). Synchronizing...", shortDigest(s.lastDigest), shortDigest(remoteDigest))
+			s.indexMu.RLock()
+			currentDigest := s.lastDigest
+			s.indexMu.RUnlock()
+
+			if remoteDigest != "" && remoteDigest != currentDigest {
+				log.Info("Detected remote OCI index update (%s -> %s). Synchronizing...", shortDigest(currentDigest), shortDigest(remoteDigest))
 
 				syncCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 				if err := s.RefreshIndex(syncCtx); err != nil {
 					log.Warning("Background sync index failed: %v", err)
 				} else {
+					s.indexMu.Lock()
 					s.lastDigest = remoteDigest
+					s.indexMu.Unlock()
 					log.Success("OCI index auto-synced successfully. Entries: %d", s.indexCount())
 				}
 				cancel()

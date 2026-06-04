@@ -319,7 +319,12 @@ func (s *Server) handleFavicon(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleAPIDigest(w http.ResponseWriter, r *http.Request) {
 	setSource(w, "cache")
 	w.Header().Set("Content-Type", "text/plain")
-	_, _ = w.Write([]byte(s.lastDigest))
+
+	s.indexMu.RLock()
+	digest := s.lastDigest
+	s.indexMu.RUnlock()
+
+	_, _ = w.Write([]byte(digest))
 }
 
 func (s *Server) handleAPIIndex(w http.ResponseWriter, r *http.Request) {
