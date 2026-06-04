@@ -34,6 +34,6 @@ outputs:
     description: "Number of store paths pushed to the OCI registry"
 
 runs:
-  using: "node20"
+  using: "node24"
   main: "src/index.js"
   post: "src/post.js"
