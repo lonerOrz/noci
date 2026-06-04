@@ -199,6 +199,22 @@ func (e *Engine) CascadeEvict(targets []string) *Result {
 		evictedSize += e.index.Entries[hash].NarSize
 	}
 
+	expiredSet := make(map[string]bool)
+	for _, t := range targets {
+		expiredSet[t] = true
+	}
+
+	for hash := range evictedSet {
+		if _, isRoot := e.index.Roots[hash]; isRoot {
+			expiredSet[hash] = true
+		}
+	}
+
+	expiredRoots := make([]string, 0, len(expiredSet))
+	for hash := range expiredSet {
+		expiredRoots = append(expiredRoots, hash)
+	}
+
 	return &Result{
 		OriginalCount: len(e.index.Entries),
 		OriginalSize:  originalSize,
@@ -207,7 +223,7 @@ func (e *Engine) CascadeEvict(targets []string) *Result {
 		EvictedCount:  len(evictedKeys),
 		EvictedSize:   evictedSize,
 		EvictedKeys:   evictedKeys,
-		ExpiredRoots:  targets,
+		ExpiredRoots:  expiredRoots,
 	}
 }
 
