@@ -43,11 +43,6 @@ async function run() {
     const proxyProcess = cp.spawn(binPath, ["proxy", "--port", proxyPort], {
       detached: true,
       stdio: ["ignore", logFd, logFd],
-      env: {
-        ...process.env,
-        HOME: "/tmp",
-        NIX_IGNORE_HOME_DIRECTORY_ERROR: "1",
-      },
     });
 
     proxyProcess.unref();
@@ -102,14 +97,7 @@ async function prepareBinary() {
 
   cp.execSync(
     `nix build "${actionRoot}" --out-link ${outLink} --option sandbox false`,
-    {
-      stdio: "inherit",
-      env: {
-        ...process.env,
-        HOME: "/tmp",
-        NIX_IGNORE_HOME_DIRECTORY_ERROR: "1",
-      },
-    },
+    { stdio: "inherit" },
   );
 
   const actualBinary = path.join(outLink, "bin/noci");

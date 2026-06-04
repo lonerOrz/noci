@@ -39,8 +39,6 @@ async function run() {
         stdio: "inherit",
         env: {
           ...process.env,
-          HOME: "/tmp",
-          NIX_IGNORE_HOME_DIRECTORY_ERROR: "1",
           NOCI_REGISTRY: registry,
           NOCI_REPO: repo,
           NOCI_SIGNING_KEY: signingKey,
