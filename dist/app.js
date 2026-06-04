@@ -2,10 +2,29 @@ let db = {};
 let localDigest = "";
 let entries = [];
 
-const currentPort = window.location.port || "8080";
-const proxyUrl = "http://127.0.0.1:" + currentPort;
+const proxyUrl = window.location.origin;
 const container = document.getElementById("package-rows");
 const searchInput = document.getElementById("search-input");
+
+function updateStatus(isActive) {
+  const badge = document.getElementById("status-badge");
+  if (!badge) return;
+  if (isActive) {
+    badge.innerHTML = `
+      <span class="inline-flex items-center rounded-full bg-emerald-500/10 px-3 py-1 text-xs font-semibold text-emerald-400 ring-1 ring-inset ring-emerald-500/20 select-none">
+        <span class="w-1.5 h-1.5 mr-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+        Active
+      </span>
+    `;
+  } else {
+    badge.innerHTML = `
+      <span class="inline-flex items-center rounded-full bg-rose-500/10 px-3 py-1 text-xs font-semibold text-rose-400 ring-1 ring-inset ring-rose-500/20 select-none animate-pulse">
+        <span class="w-1.5 h-1.5 mr-1.5 rounded-full bg-rose-400"></span>
+        Offline
+      </span>
+    `;
+  }
+}
 
 function initData(data) {
   db = data;
@@ -65,8 +84,13 @@ function render(filterText) {
 async function checkUpdate() {
   try {
     const resDigest = await fetch("/api/digest");
-    if (!resDigest.ok) return;
+    if (!resDigest.ok) {
+      updateStatus(false);
+      return;
+    }
     const digest = await resDigest.text();
+    updateStatus(true);
+
     if (!localDigest) {
       localDigest = digest;
       return;
@@ -79,7 +103,9 @@ async function checkUpdate() {
         initData(newDb);
       }
     }
-  } catch (err) {}
+  } catch (err) {
+    updateStatus(false);
+  }
 }
 
 function formatBytes(bytes) {
@@ -105,6 +131,7 @@ function copyCmd(event) {
 }
 
 async function init() {
+  updateStatus(false); // 初始默认为 Offline
   try {
     const resDigest = await fetch("/api/digest");
     if (resDigest.ok) {
@@ -114,8 +141,13 @@ async function init() {
     if (resIndex.ok) {
       const data = await resIndex.json();
       initData(data);
+      updateStatus(true);
+    } else {
+      updateStatus(false);
     }
-  } catch (err) {}
+  } catch (err) {
+    updateStatus(false);
+  }
   setInterval(checkUpdate, 3000);
 }
 
