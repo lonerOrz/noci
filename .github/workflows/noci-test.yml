@@ -26,7 +26,7 @@ jobs:
 
       - name: Build Local Dummy (Ensure Hook Triggers)
         run: |
-          nix build --no-link --expr 'with import <nixpkgs> {}; runCommand "test-path-${{ github.sha }}" {} "echo ${{ github.sha }} > $out"'
+          nix build --impure --no-link --expr 'derivation { name = "test-${{ github.sha }}"; system = "x86_64-linux"; builder = "/bin/sh"; args = [ "-c" "echo ${{ github.sha }} > $out" ]; }'
 
       - name: Build Flake Target
         run: |
