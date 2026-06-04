@@ -29,7 +29,11 @@ func ExportAndCompress(ctx context.Context, storePath string, comp string, concu
 	if err != nil {
 		return "", "", 0, err
 	}
-	defer tmp.Close()
+	defer func() {
+		if tmp != nil {
+			_ = tmp.Close()
+		}
+	}()
 
 	bufWriter := bufio.NewWriterSize(tmp, 256*1024)
 
@@ -53,6 +57,7 @@ func ExportAndCompress(ctx context.Context, storePath string, comp string, concu
 	if err != nil {
 		_ = tmp.Close()
 		_ = os.Remove(tmp.Name())
+		tmp = nil
 		return "", "", 0, err
 	}
 
@@ -68,6 +73,7 @@ func ExportAndCompress(ctx context.Context, storePath string, comp string, concu
 	if err := dumpCmd.Run(); err != nil {
 		_ = tmp.Close()
 		_ = os.Remove(tmp.Name())
+		tmp = nil
 		return "", "", 0, fmt.Errorf("nix-store dump failed: %w", err)
 	}
 
@@ -80,11 +86,15 @@ func ExportAndCompress(ctx context.Context, storePath string, comp string, concu
 	if err != nil {
 		_ = tmp.Close()
 		_ = os.Remove(tmp.Name())
+		tmp = nil
 		return "", "", 0, err
 	}
 
 	_ = tmp.Close()
-	return tmp.Name(), hex.EncodeToString(hashWriter.Sum(nil)), stat.Size(), nil
+	tempName := tmp.Name()
+	tmp = nil
+
+	return tempName, hex.EncodeToString(hashWriter.Sum(nil)), stat.Size(), nil
 }
 
 func GenerateNarInfo(storePath, narHash string, narSize int64, fileHash string, fileSize int64, refs []string, sigs []string, comp string) string {
