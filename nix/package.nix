@@ -5,10 +5,10 @@
 
 buildGoModule {
   pname = "noci";
-  version = "1.0.0";
+  version = "0-unstable-20260605";
   src = ../.;
 
-  vendorHash = "sha256-TIoBh/dd2woCkRpgngkn2rVIzsWTIt1m9wc2IXLvLiM=";
+  vendorHash = "sha256-bbB1aH4NMZIWp84Tk8W+1ttS3YP2f0fj9tG19u87h8g=";
 
   env.CGO_ENABLED = 0;
   ldflags = [
