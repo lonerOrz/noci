@@ -36,6 +36,12 @@ func (lrw *loggingResponseWriter) Write(b []byte) (int, error) {
 	return lrw.ResponseWriter.Write(b)
 }
 
+func (lrw *loggingResponseWriter) Flush() {
+	if f, ok := lrw.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
 func setSource(w http.ResponseWriter, source string) {
 	if lrw, ok := w.(*loggingResponseWriter); ok {
 		lrw.source = source
