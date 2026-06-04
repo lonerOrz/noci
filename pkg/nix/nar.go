@@ -51,27 +51,39 @@ func ExportAndCompress(ctx context.Context, storePath string, comp string, concu
 		compressor = gzip.NewWriter(multiWriter)
 	}
 	if err != nil {
+		_ = tmp.Close()
 		_ = os.Remove(tmp.Name())
 		return "", "", 0, err
 	}
+
+	defer func() {
+		if compressor != nil {
+			_ = compressor.Close()
+		}
+	}()
 
 	dumpCmd := exec.CommandContext(ctx, "nix-store", "--dump", storePath)
 	dumpCmd.Stdout = compressor
 
 	if err := dumpCmd.Run(); err != nil {
+		_ = tmp.Close()
 		_ = os.Remove(tmp.Name())
 		return "", "", 0, fmt.Errorf("nix-store dump failed: %w", err)
 	}
 
 	_ = compressor.Close()
+	compressor = nil
+
 	_ = bufWriter.Flush()
 
 	stat, err := tmp.Stat()
 	if err != nil {
+		_ = tmp.Close()
 		_ = os.Remove(tmp.Name())
 		return "", "", 0, err
 	}
 
+	_ = tmp.Close()
 	return tmp.Name(), hex.EncodeToString(hashWriter.Sum(nil)), stat.Size(), nil
 }
 
