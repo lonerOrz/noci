@@ -58,7 +58,7 @@ function render(filterText) {
   });
   if (filtered.length === 0) {
     container.innerHTML =
-      '<tr><td colspan="4" class="py-10 text-center text-sm text-slate-500">No cached packages found</td></tr>';
+      '<tr><td colspan="5" class="py-10 text-center text-sm text-slate-500">No cached packages found</td></tr>';
     return;
   }
   filtered.forEach((e) => {
@@ -66,7 +66,7 @@ function render(filterText) {
     container.innerHTML +=
       '<tr class="hover:bg-slate-900/40 transition-colors border-b border-slate-800/40 last:border-0">' +
       '<td class="whitespace-nowrap py-4 pl-6 pr-3 text-sm font-semibold text-slate-200 select-text cursor-default">' +
-      e.name +
+      `<div class="max-w-[160px] sm:max-w-[260px] md:max-w-[400px] truncate" title="${e.name}">${e.name}</div>` +
       "</td>" +
       '<td class="whitespace-nowrap px-3 py-4 text-sm font-mono text-indigo-400 select-all cursor-pointer hover:text-indigo-300">' +
       e.hash +
@@ -76,6 +76,11 @@ function render(filterText) {
       "</td>" +
       '<td class="whitespace-nowrap px-3 py-4 text-sm text-slate-500">' +
       date +
+      "</td>" +
+      '<td class="whitespace-nowrap px-3 py-4 text-right pr-6 text-sm font-medium">' +
+      `<button onclick="deletePackage(event, '${e.hash}', '${e.name}')" class="text-rose-400 hover:text-rose-300 transition-colors select-none cursor-pointer">` +
+      "Delete" +
+      "</button>" +
       "</td>" +
       "</tr>";
   });
@@ -154,3 +159,40 @@ async function init() {
 searchInput.addEventListener("input", (e) => render(e.target.value));
 window.addEventListener("DOMContentLoaded", init);
 window.copyCmd = copyCmd;
+
+async function deletePackage(event, hash, name) {
+  event.stopPropagation();
+  if (!confirm(`Are you sure you want to delete ${name} (${hash})?`)) {
+    return;
+  }
+
+  const btn = event.currentTarget || event.target;
+  const originalText = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = "Deleting...";
+
+  try {
+    const res = await fetch(`/api/delete/${hash}`, {
+      method: "DELETE",
+    });
+
+    if (res.ok) {
+      await checkUpdate();
+    } else {
+      const errText = await res.text();
+      alert(
+        "Deletion failed: " +
+          errText +
+          " (Please verify if proxy token has delete permission)",
+      );
+      btn.disabled = false;
+      btn.innerHTML = originalText;
+    }
+  } catch (err) {
+    alert("Network error occurred during deletion");
+    btn.disabled = false;
+    btn.innerHTML = originalText;
+  }
+}
+
+window.deletePackage = deletePackage;

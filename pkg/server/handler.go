@@ -103,6 +103,8 @@ func (s *Server) HandleRoutes(w http.ResponseWriter, r *http.Request) {
 		s.handleAPIDigest(lrw, r)
 	case path == "api/index":
 		s.handleAPIIndex(lrw, r)
+	case strings.HasPrefix(path, "api/delete/"):
+		s.handleAPIDelete(lrw, r, strings.TrimPrefix(path, "api/delete/"))
 	case strings.HasSuffix(path, ".narinfo"):
 		s.handleNarInfo(lrw, r, strings.TrimSuffix(path, ".narinfo"))
 	case strings.HasPrefix(path, "nar/"):
@@ -343,4 +345,54 @@ func (s *Server) handleAPIIndex(w http.ResponseWriter, r *http.Request) {
 	s.indexMu.RLock()
 	defer s.indexMu.RUnlock()
 	_ = json.NewEncoder(w).Encode(s.index)
+}
+
+func (s *Server) handleAPIDelete(w http.ResponseWriter, r *http.Request, hash string) {
+	if r.Method != http.MethodDelete {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if len(hash) != 32 {
+		http.Error(w, "Invalid hash length", http.StatusBadRequest)
+		return
+	}
+
+	ctx := r.Context()
+	log.Action("[noci-proxy] Received web request to delete package hash: %s", hash)
+
+	index, err := s.client.FetchIndex(ctx)
+	if err != nil {
+		log.Warning("Failed to fetch index for deletion: %v", err)
+		http.Error(w, "Failed to fetch index from OCI", http.StatusInternalServerError)
+		return
+	}
+
+	_, exists := index.Entries[hash]
+	if !exists {
+		http.Error(w, "Package not found in cache", http.StatusNotFound)
+		return
+	}
+
+	delete(index.Entries, hash)
+	if index.Roots != nil {
+		delete(index.Roots, hash)
+	}
+
+	log.Action("[noci-proxy] Saving updated index back to OCI...")
+	if err := s.client.PushIndex(ctx, index); err != nil {
+		log.Warning("Failed to push index after deletion: %v", err)
+		http.Error(w, "Failed to update OCI index manifest", http.StatusInternalServerError)
+		return
+	}
+
+	if err := s.client.DeleteManifest(ctx, hash); err != nil {
+		log.Warning("Optional: Failed to physically delete OCI manifest %s: %v", hash, err)
+	}
+
+	if err := s.RefreshIndex(ctx); err != nil {
+		log.Warning("Failed to refresh local proxy memory cache: %v", err)
+	}
+
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte("Package deleted successfully"))
 }
