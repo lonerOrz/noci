@@ -1,5 +1,10 @@
 name: "noci-action Test"
 on:
+  pull_request:
+    paths:
+      - "action/**"
+      - "go.**"
+      - "**.go"
   workflow_dispatch:
 
 jobs:
@@ -15,9 +20,13 @@ jobs:
       - name: Setup noci binary cache
         uses: ./action
         with:
-          repo: ${{ secrets.NOCI_REPO }}
+          repo: ${{ secrets.NOCI_REPO || 'lonerOrz/noci-cache' }}
           signing-key: ${{ secrets.NOCI_SIGNING_KEY }}
-          token: ${{ secrets.GH_TOKEN }}
+          token: ${{ secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Build Local Dummy (Ensure Hook Triggers)
+        run: |
+          nix build --no-link --expr 'with import <nixpkgs> {}; runCommand "test-path-${{ github.sha }}" {} "echo ${{ github.sha }} > $out"'
 
       - name: Build Flake Target
         run: |

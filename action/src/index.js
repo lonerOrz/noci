@@ -37,6 +37,18 @@ async function run() {
     process.env.NOCI_TOKEN = token;
     if (signingKey) process.env.NOCI_SIGNING_KEY = signingKey;
 
+    const hookLogPath = "/tmp/noci-build-paths.log";
+    fs.writeFileSync(
+      "/tmp/noci-hook.sh",
+      `#!/bin/sh
+for path in $OUT_PATHS; do
+  if [ -n "$path" ]; then
+    echo "$path" >> ${hookLogPath}
+  fi
+done`,
+      { mode: 0o755 },
+    );
+
     const logPath = "/tmp/noci-proxy.log";
     const logFd = fs.openSync(logPath, "w");
 
@@ -54,15 +66,15 @@ async function run() {
     utils.exportOutput("proxy-url", proxyUrl);
 
     const pubKey = await fetchPublicKey(proxyUrl);
-    if (pubKey) {
-      utils.exportVariable(
-        "NIX_CONFIG",
-        `extra-substituters = ${proxyUrl}\nextra-trusted-public-keys = ${pubKey}\nfallback = true`,
-      );
-    }
 
-    const initialPaths = fs.readdirSync("/nix/store");
-    fs.writeFileSync("/tmp/noci-initial-store.txt", initialPaths.join("\n"));
+    const nixConfigParts = [];
+    nixConfigParts.push("post-build-hook = /tmp/noci-hook.sh");
+    if (pubKey) {
+      nixConfigParts.push(`extra-substituters = ${proxyUrl}`);
+      nixConfigParts.push(`extra-trusted-public-keys = ${pubKey}`);
+      nixConfigParts.push("fallback = true");
+    }
+    utils.exportVariable("NIX_CONFIG", nixConfigParts.join("\n"));
   } catch (error) {
     utils.fail(error.message);
   }
@@ -71,6 +83,26 @@ async function run() {
 async function prepareBinary() {
   const target = "/tmp/noci";
   if (fs.existsSync(target)) return target;
+
+  const actionRoot = path.resolve(__dirname, "../..");
+
+  const candidates = [
+    path.join(actionRoot, "action/noci"),
+    path.join(actionRoot, "noci"),
+    path.join(__dirname, "../noci"),
+  ];
+  for (const p of candidates) {
+    if (fs.existsSync(p)) {
+      console.log(`[noci-action] Using pre-built binary at ${p}`);
+      try {
+        fs.symlinkSync(p, target);
+      } catch (e) {
+        fs.copyFileSync(p, target);
+        fs.chmodSync(target, "755");
+      }
+      return target;
+    }
+  }
 
   const version = process.env.GITHUB_ACTION_REF;
   const repo = process.env.GITHUB_ACTION_REPOSITORY || "lonerOrz/noci";
@@ -89,16 +121,15 @@ async function prepareBinary() {
     console.log(`[noci-action] GITHUB_ACTION_REF is empty, building locally...`);
   }
 
-  const actionRoot = path.resolve(__dirname, "../..");
   const outLink = "/tmp/noci-result";
   if (fs.existsSync(outLink))
     fs.rmSync(outLink, { recursive: true, force: true });
   if (fs.existsSync(target)) fs.unlinkSync(target);
 
-  cp.execSync(
-    `nix build "${actionRoot}" --out-link ${outLink} --option sandbox false`,
-    { stdio: "inherit" },
-  );
+  cp.execSync(`nix build "${actionRoot}" --out-link ${outLink}`, {
+    stdio: "inherit",
+    env: utils.getSafeEnv(),
+  });
 
   const actualBinary = path.join(outLink, "bin/noci");
   if (!fs.existsSync(actualBinary))
