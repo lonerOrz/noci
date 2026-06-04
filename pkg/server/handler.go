@@ -42,6 +42,10 @@ func (lrw *loggingResponseWriter) Flush() {
 	}
 }
 
+func (lrw *loggingResponseWriter) Unwrap() http.ResponseWriter {
+	return lrw.ResponseWriter
+}
+
 func setSource(w http.ResponseWriter, source string) {
 	if lrw, ok := w.(*loggingResponseWriter); ok {
 		lrw.source = source
