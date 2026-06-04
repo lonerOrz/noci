@@ -10,6 +10,10 @@ function writeMultiline(filePath, key, value) {
 }
 
 module.exports = {
+  getSafeEnv(extras = {}) {
+    return { ...process.env, NIX_IGNORE_HOME_DIRECTORY_ERROR: "1", ...extras };
+  },
+
   getEnvOrInput(envKey, inputKey) {
     return (
       process.env[envKey] || process.env[`INPUT_${inputKey.toUpperCase()}`]
