@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/klauspost/compress/zstd"
+	"golang.org/x/term"
 )
 
 type OCIManifest struct {
@@ -540,7 +541,7 @@ func (c *Client) UploadBlob(ctx context.Context, filePath, sha256Hex, descriptio
 
 	stat, _ := file.Stat()
 
-	pr := &progressReader{r: file, total: stat.Size(), description: description}
+	pr := newProgressReader(file, stat.Size(), description)
 	req, err := http.NewRequestWithContext(ctx, "PUT", uploadURL, pr)
 	if err != nil {
 		fmt.Println()
@@ -601,6 +602,22 @@ type progressReader struct {
 	total       int64
 	done        int64
 	description string
+	isTTY       bool
+	lastPrint   time.Time
+	lastBucket  int
+	cursorReset bool // 防止高频调用时发生多重 Terminal 回车
+}
+
+// 针对 os.Stderr 检测 TTY 属性，因为进度 UI 条作为诊断状态信息应当输出到标准错误流（Stderr）
+func newProgressReader(r io.Reader, total int64, description string) *progressReader {
+	isTTY := term.IsTerminal(int(os.Stderr.Fd()))
+	return &progressReader{
+		r:           r,
+		total:       total,
+		description: description,
+		isTTY:       isTTY,
+		lastBucket:  -1, // 初始化为 -1 确保 0% 桶在起始被触发时能够正常输出
+	}
 }
 
 func (pr *progressReader) Read(p []byte) (int, error) {
@@ -608,7 +625,28 @@ func (pr *progressReader) Read(p []byte) (int, error) {
 	pr.done += int64(n)
 	if pr.total > 0 {
 		pct := float64(pr.done) * 100 / float64(pr.total)
-		fmt.Printf("\r\x1b[K▶ [noci] Uploading %s... %.1f%% (%s / %s)", pr.description, pct, FormatSize(pr.done), FormatSize(pr.total))
+
+		if pr.isTTY {
+			// 物理 TTY 终端环境，采用 200ms 高频刷屏覆盖，并将 UI 信息安全重定向输出至 Stderr
+			now := time.Now()
+			if pr.lastPrint.IsZero() || pr.done == pr.total || err != nil || now.Sub(pr.lastPrint) >= 200*time.Millisecond {
+				fmt.Fprintf(os.Stderr, "\r\x1b[K▶ [noci] Uploading %s... %.1f%% (%s / %s)", pr.description, pct, FormatSize(pr.done), FormatSize(pr.total))
+				pr.lastPrint = now
+			}
+
+			// 上传彻底结束时，向 Stderr 补打一个回车换行
+			if pr.done == pr.total && !pr.cursorReset {
+				fmt.Fprintln(os.Stderr)
+				pr.cursorReset = true
+			}
+		} else {
+			// 非 TTY 终端（CI 管道、重定向、管道、tee），采用滑动桶（for 步长递增）补齐方案
+			bucket := int(pct) / 10
+			for bucket > pr.lastBucket {
+				pr.lastBucket++
+				fmt.Fprintf(os.Stderr, "▶ [noci] Uploading %s... %d%% (%s / %s)\n", pr.description, pr.lastBucket*10, FormatSize(pr.done), FormatSize(pr.total))
+			}
+		}
 	}
 	return n, err
 }

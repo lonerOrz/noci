@@ -36,6 +36,16 @@ func (lrw *loggingResponseWriter) Write(b []byte) (int, error) {
 	return lrw.ResponseWriter.Write(b)
 }
 
+func (lrw *loggingResponseWriter) Flush() {
+	if f, ok := lrw.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func (lrw *loggingResponseWriter) Unwrap() http.ResponseWriter {
+	return lrw.ResponseWriter
+}
+
 func setSource(w http.ResponseWriter, source string) {
 	if lrw, ok := w.(*loggingResponseWriter); ok {
 		lrw.source = source
@@ -319,7 +329,12 @@ func (s *Server) handleFavicon(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleAPIDigest(w http.ResponseWriter, r *http.Request) {
 	setSource(w, "cache")
 	w.Header().Set("Content-Type", "text/plain")
-	_, _ = w.Write([]byte(s.lastDigest))
+
+	s.indexMu.RLock()
+	digest := s.lastDigest
+	s.indexMu.RUnlock()
+
+	_, _ = w.Write([]byte(digest))
 }
 
 func (s *Server) handleAPIIndex(w http.ResponseWriter, r *http.Request) {

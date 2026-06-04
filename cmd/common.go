@@ -112,19 +112,20 @@ func readDockerConfigToken(registry string) string {
 	return parts[1]
 }
 
-// resolveHashes 统一解析输入。原生兼容 32 位 Nix 纯哈希、Nix Store 绝对路径以及 Flake 构建目标。
+// 统一解析输入
 func resolveHashes(ctx context.Context, args []string, allowBuild bool) ([]string, error) {
 	var hashes []string
 	for _, arg := range args {
-		// 💡 健壮性优化：转换为全小写并去除空格，规避大小写不一致或环境差异导致的正则误判
-		arg = strings.ToLower(strings.TrimSpace(arg))
+		// 仅去除两端空格
+		arg = strings.TrimSpace(arg)
 		if arg == "" {
 			continue
 		}
 
-		// 策略 A: 原生 32 位 Nix 哈希格式（最轻量，无本地 Nix 评估开销）
-		if nixHashRegex.MatchString(arg) {
-			hashes = append(hashes, arg)
+		// 策略 A: 原生 32 位 Nix 哈希格式
+		lowerArg := strings.ToLower(arg)
+		if nixHashRegex.MatchString(lowerArg) {
+			hashes = append(hashes, lowerArg)
 			continue
 		}
 
@@ -132,7 +133,7 @@ func resolveHashes(ctx context.Context, args []string, allowBuild bool) ([]strin
 		if strings.HasPrefix(arg, "/nix/store") {
 			hash := nix.GetPathHash(arg)
 			if hash != "" {
-				hashes = append(hashes, hash)
+				hashes = append(hashes, strings.ToLower(hash))
 			}
 			continue
 		}
@@ -147,7 +148,7 @@ func resolveHashes(ctx context.Context, args []string, allowBuild bool) ([]strin
 			for _, path := range buildPaths {
 				hash := nix.GetPathHash(path)
 				if hash != "" {
-					hashes = append(hashes, hash)
+					hashes = append(hashes, strings.ToLower(hash))
 				}
 			}
 		} else {
@@ -158,7 +159,7 @@ func resolveHashes(ctx context.Context, args []string, allowBuild bool) ([]strin
 			}
 			hash := nix.GetPathHash(outPath)
 			if hash != "" {
-				hashes = append(hashes, hash)
+				hashes = append(hashes, strings.ToLower(hash))
 			} else {
 				return nil, fmt.Errorf("target %q evaluated to invalid store path: %s", arg, outPath)
 			}

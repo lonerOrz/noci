@@ -92,14 +92,34 @@ func runGC(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	if gcPhysicalSweep {
+	type blobSweepInfo struct {
+		key    string
+		digest string
+	}
+	var sweepList []blobSweepInfo
+	for _, key := range result.EvictedKeys {
+		if entry, exists := index.Entries[key]; exists {
+			sweepList = append(sweepList, blobSweepInfo{
+				key:    key,
+				digest: entry.NarDigest,
+			})
+		}
+	}
+
+	engine.Apply(result)
+
+	log.Action("Updating OCI state...")
+	if err := client.PushIndex(ctx, index); err != nil {
+		return fmt.Errorf("failed to push updated index: %w", err)
+	}
+
+	if gcPhysicalSweep && len(sweepList) > 0 {
 		log.Action("Sweeping blobs concurrently (8 workers)...")
 		sem := make(chan struct{}, 8)
 		var wg sync.WaitGroup
 		var warnOnce sync.Once
 
-		for _, key := range result.EvictedKeys {
-			entry := index.Entries[key]
+		for _, sweep := range sweepList {
 			sem <- struct{}{}
 			wg.Add(1)
 
@@ -119,16 +139,9 @@ func runGC(cmd *cobra.Command, args []string) error {
 					}
 					log.Warning("Failed to delete blob sha256:%s: %v", digest, err)
 				}
-			}(entry.NarDigest, key)
+			}(sweep.digest, sweep.key)
 		}
 		wg.Wait()
-	}
-
-	engine.Apply(result)
-
-	log.Action("Updating OCI state...")
-	if err := client.PushIndex(ctx, index); err != nil {
-		return fmt.Errorf("failed to push updated index: %w", err)
 	}
 
 	log.Success("GC completed.")
