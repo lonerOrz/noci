@@ -88,22 +88,56 @@ func (p *Publisher) Publish(ctx context.Context, inputPaths []string) error {
 	}
 
 	t3 = time.Now()
-	var uncachedPaths []string
-	var repairCount int
+	var missing []struct {
+		path string
+		hash string
+	}
 	for _, path := range closure {
 		hash := nix.GetPathHash(path)
-		if _, exists := index.Entries[hash]; exists {
-			continue
+		if _, exists := index.Entries[hash]; !exists {
+			missing = append(missing, struct {
+				path string
+				hash string
+			}{path, hash})
 		}
-		if exists, _ := p.client.ManifestExists(ctx, hash); exists {
-			if err := p.client.RepairIndexEntry(ctx, hash, index); err != nil {
-				log.Warning("Failed to repair index entry for %s: %v", hash, err)
+	}
+
+	type checkResult struct {
+		hash   string
+		path   string
+		exists bool
+	}
+	resultChan := make(chan checkResult, len(missing))
+	checkSem := make(chan struct{}, 8)
+	var checkWg sync.WaitGroup
+
+	for _, m := range missing {
+		checkSem <- struct{}{}
+		checkWg.Add(1)
+		go func(path, hash string) {
+			defer func() {
+				<-checkSem
+				checkWg.Done()
+			}()
+			exists, _ := p.client.ManifestExists(ctx, hash)
+			resultChan <- checkResult{hash: hash, path: path, exists: exists}
+		}(m.path, m.hash)
+	}
+	checkWg.Wait()
+	close(resultChan)
+
+	var uncachedPaths []string
+	var repairCount int
+	for res := range resultChan {
+		if res.exists {
+			if err := p.client.RepairIndexEntry(ctx, res.hash, index); err != nil {
+				log.Warning("Failed to repair index entry for %s: %v", res.hash, err)
 			} else {
 				repairCount++
 			}
 			continue
 		}
-		uncachedPaths = append(uncachedPaths, path)
+		uncachedPaths = append(uncachedPaths, res.path)
 	}
 
 	if repairCount > 0 {
@@ -303,10 +337,10 @@ func (p *Publisher) publishSingle(ctx context.Context, info nix.PathInfo) (uploa
 	if err != nil {
 		return uploadResult{}, fmt.Errorf("export failed: %w", err)
 	}
+	defer os.Remove(tempFile)
 	exportDuration := time.Since(exportStart)
 
 	digest, uploadSize, err := p.client.UploadBlobMonolithic(ctx, tempFile, fileHash, "NAR")
-	os.Remove(tempFile)
 
 	uploadDuration := time.Since(exportStart)
 	_ = uploadSize

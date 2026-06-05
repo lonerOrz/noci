@@ -101,51 +101,6 @@ func ExportAndCompress(ctx context.Context, storePath string, comp string, concu
 	return tempName, hex.EncodeToString(hashWriter.Sum(nil)), stat.Size(), nil
 }
 
-func ExportAndCompressStream(ctx context.Context, storePath, comp string, concurrency int, level int) (io.ReadCloser, error) {
-	pr, pw := io.Pipe()
-
-	if concurrency <= 0 {
-		concurrency = runtime.NumCPU() / 2
-		if concurrency < 1 {
-			concurrency = 1
-		} else if concurrency > 4 {
-			concurrency = 4
-		}
-	}
-
-	go func() {
-		var compressor io.WriteCloser
-		var err error
-
-		if comp == "zstd" {
-			if level <= 0 {
-				level = 3
-			}
-			compressor, err = zstd.NewWriter(pw, zstd.WithEncoderConcurrency(concurrency), zstd.WithEncoderLevel(zstd.EncoderLevel(level)))
-		} else {
-			compressor = gzip.NewWriter(pw)
-		}
-		if err != nil {
-			pw.CloseWithError(err)
-			return
-		}
-
-		dumpCmd := exec.CommandContext(ctx, "nix-store", "--dump", storePath)
-		dumpCmd.Stdout = compressor
-
-		if runErr := dumpCmd.Run(); runErr != nil {
-			compressor.Close()
-			pw.CloseWithError(fmt.Errorf("nix-store dump failed: %w", runErr))
-			return
-		}
-
-		compressor.Close()
-		pw.Close()
-	}()
-
-	return pr, nil
-}
-
 func GenerateNarInfo(storePath, narHash string, narSize int64, fileHash string, fileSize int64, refs []string, sigs []string, comp string) string {
 	ext := ".nar.gz"
 	compName := "gzip"

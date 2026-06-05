@@ -63,7 +63,6 @@ func NewClient(registry, repo, token string) *Client {
 		repo:     strings.ToLower(repo),
 		token:    token,
 		client: &http.Client{
-			Timeout:   5 * time.Minute,
 			Transport: transport,
 		},
 	}
@@ -630,7 +629,9 @@ func (c *Client) UploadBlobMonolithic(ctx context.Context, filePath, sha256Hex, 
 	}
 	size = stat.Size()
 
-	if headResp, headErr := c.Request(ctx, "HEAD", "/blobs/"+digest, nil, ""); headErr == nil {
+	headCtx, headCancel := context.WithTimeout(ctx, 30*time.Second)
+	defer headCancel()
+	if headResp, headErr := c.Request(headCtx, "HEAD", "/blobs/"+digest, nil, ""); headErr == nil {
 		headResp.Body.Close()
 		if headResp.StatusCode == http.StatusOK {
 			if c.Profile {
