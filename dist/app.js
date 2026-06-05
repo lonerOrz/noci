@@ -17,17 +17,17 @@ function updateStatus(isActive) {
   if (!badge) return;
   if (isActive) {
     badge.innerHTML = `
-      <span class="inline-flex items-center rounded-full bg-emerald-500/10 px-3 py-1 text-xs font-semibold text-emerald-400 ring-1 ring-inset ring-emerald-500/20 select-none">
-        <span class="w-1.5 h-1.5 mr-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+      <div class="status-active">
+        <span class="dot"></span>
         Active
-      </span>
+      </div>
     `;
   } else {
     badge.innerHTML = `
-      <span class="inline-flex items-center rounded-full bg-rose-500/10 px-3 py-1 text-xs font-semibold text-rose-400 ring-1 ring-inset ring-rose-500/20 select-none animate-pulse">
-        <span class="w-1.5 h-1.5 mr-1.5 rounded-full bg-rose-400"></span>
+      <div class="status-offline">
+        <span class="dot"></span>
         Offline
-      </span>
+      </div>
     `;
   }
 }
@@ -97,8 +97,7 @@ function renderPage(data) {
 function renderEntries() {
   container.innerHTML = "";
   if (entries.length === 0) {
-    const colspanVal = canDelete ? "5" : "4";
-    container.innerHTML = `<tr><td colspan="${colspanVal}" class="py-10 text-center text-sm text-slate-500">No cached packages found</td></tr>`;
+    container.innerHTML = `<tr><td colspan="${canDelete ? 5 : 4}" class="empty-row">No cached packages found</td></tr>`;
     return;
   }
   entries.forEach((e, index) => {
@@ -107,34 +106,29 @@ function renderEntries() {
 
     let actionCell = "";
     if (canDelete) {
-      actionCell =
-        '<td class="whitespace-nowrap px-3 py-4 text-right pr-6 text-sm font-medium">' +
-        `<button onclick="deletePackage(event, '${e.hash}', '${e.name}')" class="text-rose-400 hover:text-rose-300 select-none cursor-pointer btn-polish px-2 py-1 rounded">` +
-        "Delete" +
-        "</button>" +
-        "</td>";
+      actionCell = `
+        <td>
+          <button onclick="deletePackage(event, '${e.hash}', '${e.name}')" class="delete-btn">Delete</button>
+        </td>
+      `;
     }
 
-    container.innerHTML +=
-      `<tr class="hover:bg-slate-900/40 transition-colors duration-150 border-b border-slate-800/40 last:border-0 row-fade-in" style="animation-delay: ${staggerDelay}ms">` +
-      '<td class="whitespace-nowrap py-4 pl-6 pr-3 text-sm font-semibold text-slate-200 select-text cursor-default">' +
-      `<div class="max-w-[160px] sm:max-w-[260px] md:max-w-[360px] truncate" title="${e.name}">${e.name}</div>` +
-      "</td>" +
-      '<td class="whitespace-nowrap px-3 py-4 text-sm font-mono text-indigo-400 select-all cursor-pointer hover:text-indigo-300">' +
-      `<div class="max-w-[110px] sm:max-w-[170px] md:max-w-[240px] truncate" title="${e.hash}">${e.hash}</div>` +
-      "</td>" +
-      '<td class="whitespace-nowrap px-3 py-4 text-sm text-slate-300 font-medium">' +
-      formatBytes(e.nar_size) +
-      "</td>" +
-      '<td class="whitespace-nowrap px-3 py-4 text-sm text-slate-500">' +
-      date +
-      "</td>" +
-      actionCell +
-      "</tr>";
+    container.innerHTML += `
+      <tr class="row-fade-in" style="animation-delay: ${staggerDelay}ms">
+        <td>
+          <div class="name-cell" title="${e.name}">${e.name}</div>
+        </td>
+        <td>
+          <div class="hash-cell" title="${e.hash}">${e.hash}</div>
+        </td>
+        <td>${formatBytes(e.nar_size)}</td>
+        <td>${date}</td>
+        ${actionCell}
+      </tr>
+    `;
   });
 }
 
-// 动态渲染并挂载分页控制器 UI 元素
 function renderPagination(total, page, limit) {
   const maxPage = Math.ceil(total / limit) || 1;
   currentPage = page;
@@ -143,11 +137,9 @@ function renderPagination(total, page, limit) {
   if (!paginationContainer) {
     paginationContainer = document.createElement("div");
     paginationContainer.id = "pagination-controls";
-    paginationContainer.className =
-      "flex items-center justify-between border-t border-slate-800/60 px-6 py-4 bg-slate-900/10";
     const table = container.closest("table");
     if (table && table.parentElement) {
-      table.parentElement.appendChild(paginationContainer);
+      table.parentElement.parentElement.appendChild(paginationContainer);
     }
   }
 
@@ -155,29 +147,13 @@ function renderPagination(total, page, limit) {
   const endIdx = Math.min(page * limit, total);
 
   paginationContainer.innerHTML = `
-    <div class="flex flex-1 justify-between sm:hidden">
-      <button onclick="changePage(${page - 1})" ${page <= 1 ? "disabled" : ""} class="relative inline-flex items-center rounded-md border border-slate-700 bg-slate-800 px-4 py-2 text-sm font-medium text-slate-300 hover:bg-slate-700 disabled:opacity-50 select-none cursor-pointer">Previous</button>
-      <button onclick="changePage(${page + 1})" ${page >= maxPage ? "disabled" : ""} class="relative ml-3 inline-flex items-center rounded-md border border-slate-700 bg-slate-800 px-4 py-2 text-sm font-medium text-slate-300 hover:bg-slate-700 disabled:opacity-50 select-none cursor-pointer">Next</button>
+    <div class="pagination-info">
+      Showing ${startIdx} to ${endIdx} of ${total} packages
     </div>
-    <div class="hidden sm:flex sm:flex-1 sm:items-center sm:justify-between">
-      <div>
-        <p class="text-sm text-slate-400">
-          Showing <span class="font-medium text-slate-200">${startIdx}</span> to <span class="font-medium text-slate-200">${endIdx}</span> of <span class="font-medium text-slate-200">${total}</span> packages
-        </p>
-      </div>
-      <div>
-        <nav class="isolate inline-flex -space-x-px rounded-md shadow-sm" aria-label="Pagination">
-          <button onclick="changePage(${page - 1})" ${page <= 1 ? "disabled" : ""} class="relative inline-flex items-center rounded-l-md px-3 py-2 text-slate-400 ring-1 ring-inset ring-slate-700 hover:bg-slate-800 focus:z-20 focus:outline-offset-0 disabled:opacity-30 cursor-pointer select-none">
-            &larr; Prev
-          </button>
-          <span class="relative inline-flex items-center px-4 py-2 text-sm font-semibold text-slate-300 ring-1 ring-inset ring-slate-700 focus:outline-offset-0">
-            Page ${page} of ${maxPage}
-          </span>
-          <button onclick="changePage(${page + 1})" ${page >= maxPage ? "disabled" : ""} class="relative inline-flex items-center rounded-r-md px-3 py-2 text-slate-400 ring-1 ring-inset ring-slate-700 hover:bg-slate-800 focus:z-20 focus:outline-offset-0 disabled:opacity-30 cursor-pointer select-none">
-            Next &rarr;
-          </button>
-        </nav>
-      </div>
+    <div class="pagination-nav">
+      <button onclick="changePage(${page - 1})" ${page <= 1 ? "disabled" : ""} class="pagination-btn">← Prev</button>
+      <span class="pagination-text">Page ${page} of ${maxPage}</span>
+      <button onclick="changePage(${page + 1})" ${page >= maxPage ? "disabled" : ""} class="pagination-btn">Next →</button>
     </div>
   `;
 }
@@ -203,7 +179,7 @@ async function checkUpdate() {
     }
     if (digest && digest !== localDigest) {
       localDigest = digest;
-      await fetchPage(); // 触发刷新当前分页数据
+      await fetchPage();
     }
   } catch (err) {
     updateStatus(false);
@@ -224,10 +200,14 @@ function copyCmd(event) {
     const btn = event.currentTarget || event.target;
     const originalText = btn.innerText;
     btn.innerText = "Copied!";
-    btn.classList.replace("bg-slate-800", "bg-emerald-600");
+    btn.style.backgroundColor = "var(--accent-emerald)";
+    btn.style.borderColor = "var(--accent-emerald)";
+    btn.style.color = "white";
     setTimeout(() => {
       btn.innerText = originalText;
-      btn.classList.replace("bg-emerald-600", "bg-slate-800");
+      btn.style.backgroundColor = "var(--bg-secondary)";
+      btn.style.borderColor = "var(--border-normal)";
+      btn.style.color = "var(--text-secondary)";
     }, 1500);
   });
 }
@@ -246,13 +226,12 @@ async function init() {
   setInterval(checkUpdate, 3000);
 }
 
-// 模糊搜索输入防抖 (Debounce) 逻辑，防止高频触发数据库接口请求
 let searchTimeout;
 searchInput.addEventListener("input", (e) => {
   clearTimeout(searchTimeout);
   searchTimeout = setTimeout(() => {
     searchTerm = e.target.value;
-    currentPage = 1; // 重新搜索时将页码重置回第 1 页
+    currentPage = 1;
     fetchPage();
   }, 250);
 });
@@ -262,9 +241,7 @@ window.copyCmd = copyCmd;
 
 async function deletePackage(event, hash, name) {
   event.stopPropagation();
-  if (!confirm(`Are you sure you want to delete ${name} (${hash})?`)) {
-    return;
-  }
+  if (!confirm(`Are you sure you want to delete ${name} (${hash})?`)) return;
 
   const btn = event.currentTarget || event.target;
   const originalText = btn.innerHTML;
@@ -272,16 +249,11 @@ async function deletePackage(event, hash, name) {
   btn.innerHTML = "Deleting...";
 
   const backupEntries = [...entries];
-
-  // 乐观更新：本地当前页剔除该条记录并重渲染
   entries = entries.filter((e) => e.hash !== hash);
   renderEntries();
 
   try {
-    const res = await fetch(`/api/delete/${hash}`, {
-      method: "DELETE",
-    });
-
+    const res = await fetch(`/api/delete/${hash}`, { method: "DELETE" });
     if (res.ok) {
       await checkUpdate();
     } else {
