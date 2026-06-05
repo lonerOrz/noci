@@ -23,6 +23,7 @@ type Server struct {
 	negCache      sync.Map
 	lastFetch     time.Time
 	lastDigest    string
+	canDelete     bool
 }
 
 func NewServer(registry, repo, token, addr, upstream string) *Server {
@@ -62,6 +63,7 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 	cancel()
 
+	s.StartPreflightProbe()
 	go s.startActiveSyncLoop(ctx, 5*time.Second)
 
 	mux := http.NewServeMux()

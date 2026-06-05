@@ -1,6 +1,7 @@
 let db = {};
 let localDigest = "";
 let entries = [];
+let canDelete = false;
 
 const proxyUrl = window.location.origin;
 const container = document.getElementById("package-rows");
@@ -26,8 +27,31 @@ function updateStatus(isActive) {
   }
 }
 
+function updateStats(dataList) {
+  const totalBytes = dataList.reduce((acc, cur) => acc + cur.nar_size, 0);
+  document.getElementById("stat-count").innerText = dataList.length;
+  document.getElementById("stat-size").innerText = formatBytes(totalBytes);
+}
+
+function rollbackUI(backupEntries, btn, originalText) {
+  entries = backupEntries;
+  render(searchInput.value);
+  updateStats(entries);
+  if (btn) {
+    btn.disabled = false;
+    btn.innerHTML = originalText;
+  }
+}
+
 function initData(data) {
   db = data;
+  canDelete = !!db.canDelete;
+
+  const actionsHeader = document.getElementById("actions-header");
+  if (actionsHeader) {
+    actionsHeader.style.display = canDelete ? "table-cell" : "none";
+  }
+
   document.getElementById("repo-name").innerText =
     "OCI Repository: " + db.registry + "/" + db.repo;
   document.getElementById("stat-endpoint").innerText = db.registry;
@@ -43,9 +67,7 @@ function initData(data) {
     }))
     .sort((a, b) => b.added.localeCompare(a.added));
 
-  const totalBytes = entries.reduce((acc, cur) => acc + cur.nar_size, 0);
-  document.getElementById("stat-count").innerText = entries.length;
-  document.getElementById("stat-size").innerText = formatBytes(totalBytes);
+  updateStats(entries);
   render(searchInput.value);
 }
 
@@ -57,19 +79,32 @@ function render(filterText) {
     return e.name.toLowerCase().includes(q) || e.hash.toLowerCase().includes(q);
   });
   if (filtered.length === 0) {
+    const colspanVal = canDelete ? "5" : "4";
     container.innerHTML =
-      '<tr><td colspan="5" class="py-10 text-center text-sm text-slate-500">No cached packages found</td></tr>';
+      `<tr><td colspan="${colspanVal}" class="py-10 text-center text-sm text-slate-500">No cached packages found</td></tr>`;
     return;
   }
-  filtered.forEach((e) => {
+  filtered.forEach((e, index) => {
     const date = new Date(e.added).toLocaleString();
+    const staggerDelay = index * 30;
+
+    let actionCell = "";
+    if (canDelete) {
+      actionCell =
+        '<td class="whitespace-nowrap px-3 py-4 text-right pr-6 text-sm font-medium">' +
+        `<button onclick="deletePackage(event, '${e.hash}', '${e.name}')" class="text-rose-400 hover:text-rose-300 select-none cursor-pointer btn-polish px-2 py-1 rounded">` +
+        "Delete" +
+        "</button>" +
+        "</td>";
+    }
+
     container.innerHTML +=
-      '<tr class="hover:bg-slate-900/40 transition-colors border-b border-slate-800/40 last:border-0">' +
+      `<tr class="hover:bg-slate-900/40 transition-colors duration-150 border-b border-slate-800/40 last:border-0 row-fade-in" style="animation-delay: ${staggerDelay}ms">` +
       '<td class="whitespace-nowrap py-4 pl-6 pr-3 text-sm font-semibold text-slate-200 select-text cursor-default">' +
-      `<div class="max-w-[160px] sm:max-w-[260px] md:max-w-[400px] truncate" title="${e.name}">${e.name}</div>` +
+      `<div class="max-w-[160px] sm:max-w-[260px] md:max-w-[360px] truncate" title="${e.name}">${e.name}</div>` +
       "</td>" +
       '<td class="whitespace-nowrap px-3 py-4 text-sm font-mono text-indigo-400 select-all cursor-pointer hover:text-indigo-300">' +
-      e.hash +
+      `<div class="max-w-[110px] sm:max-w-[170px] md:max-w-[240px] truncate" title="${e.hash}">${e.hash}</div>` +
       "</td>" +
       '<td class="whitespace-nowrap px-3 py-4 text-sm text-slate-300 font-medium">' +
       formatBytes(e.nar_size) +
@@ -77,11 +112,7 @@ function render(filterText) {
       '<td class="whitespace-nowrap px-3 py-4 text-sm text-slate-500">' +
       date +
       "</td>" +
-      '<td class="whitespace-nowrap px-3 py-4 text-right pr-6 text-sm font-medium">' +
-      `<button onclick="deletePackage(event, '${e.hash}', '${e.name}')" class="text-rose-400 hover:text-rose-300 transition-colors select-none cursor-pointer">` +
-      "Delete" +
-      "</button>" +
-      "</td>" +
+      actionCell +
       "</tr>";
   });
 }
@@ -136,7 +167,7 @@ function copyCmd(event) {
 }
 
 async function init() {
-  updateStatus(false); // 初始默认为 Offline
+  updateStatus(false);
   try {
     const resDigest = await fetch("/api/digest");
     if (resDigest.ok) {
@@ -171,6 +202,12 @@ async function deletePackage(event, hash, name) {
   btn.disabled = true;
   btn.innerHTML = "Deleting...";
 
+  const backupEntries = [...entries];
+
+  entries = entries.filter((e) => e.hash !== hash);
+  render(searchInput.value);
+  updateStats(entries);
+
   try {
     const res = await fetch(`/api/delete/${hash}`, {
       method: "DELETE",
@@ -179,19 +216,17 @@ async function deletePackage(event, hash, name) {
     if (res.ok) {
       await checkUpdate();
     } else {
+      rollbackUI(backupEntries, btn, originalText);
       const errText = await res.text();
       alert(
         "Deletion failed: " +
           errText +
-          " (Please verify if proxy token has delete permission)",
+          "\n(Please verify if proxy token has delete/write permission)",
       );
-      btn.disabled = false;
-      btn.innerHTML = originalText;
     }
   } catch (err) {
+    rollbackUI(backupEntries, btn, originalText);
     alert("Network error occurred during deletion");
-    btn.disabled = false;
-    btn.innerHTML = originalText;
   }
 }
 

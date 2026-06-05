@@ -344,7 +344,20 @@ func (s *Server) handleAPIIndex(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	s.indexMu.RLock()
 	defer s.indexMu.RUnlock()
-	_ = json.NewEncoder(w).Encode(s.index)
+
+	if s.index == nil {
+		http.Error(w, "Index not ready", http.StatusServiceUnavailable)
+		return
+	}
+
+	response := struct {
+		*oci.CacheIndex
+		CanDelete bool `json:"canDelete"`
+	}{
+		CacheIndex: s.index,
+		CanDelete:  s.canDelete,
+	}
+	_ = json.NewEncoder(w).Encode(response)
 }
 
 func (s *Server) handleAPIDelete(w http.ResponseWriter, r *http.Request, hash string) {
@@ -354,6 +367,10 @@ func (s *Server) handleAPIDelete(w http.ResponseWriter, r *http.Request, hash st
 	}
 	if len(hash) != 32 {
 		http.Error(w, "Invalid hash length", http.StatusBadRequest)
+		return
+	}
+	if !s.canDelete {
+		http.Error(w, "Deletion is disabled (read-only proxy mode)", http.StatusForbidden)
 		return
 	}
 
@@ -381,18 +398,61 @@ func (s *Server) handleAPIDelete(w http.ResponseWriter, r *http.Request, hash st
 	log.Action("[noci-proxy] Saving updated index back to OCI...")
 	if err := s.client.PushIndex(ctx, index); err != nil {
 		log.Warning("Failed to push index after deletion: %v", err)
-		http.Error(w, "Failed to update OCI index manifest", http.StatusInternalServerError)
+		http.Error(w, "Failed to update OCI index (verify write permissions)", http.StatusInternalServerError)
 		return
 	}
 
-	if err := s.client.DeleteManifest(ctx, hash); err != nil {
-		log.Warning("Optional: Failed to physically delete OCI manifest %s: %v", hash, err)
-	}
+	newDigest := fmt.Sprintf("%s-dirty-%d", s.lastDigest, time.Now().UnixNano())
+	s.indexMu.Lock()
+	s.index = index
+	s.lastDigest = newDigest
+	s.indexMu.Unlock()
 
-	if err := s.RefreshIndex(ctx); err != nil {
-		log.Warning("Failed to refresh local proxy memory cache: %v", err)
-	}
+	go func() {
+		bgCtx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+		defer cancel()
+
+		log.Action("[noci-proxy][bg] Deleting physical manifest from OCI: %s", hash)
+		if err := s.client.DeleteManifest(bgCtx, hash); err != nil {
+			log.Warning("[noci-proxy][bg] Optional: Failed to physically delete OCI manifest %s: %v", hash, err)
+		}
+
+		log.Action("[noci-proxy][bg] Finalizing local index refresh...")
+		if err := s.RefreshIndex(bgCtx); err != nil {
+			log.Warning("[noci-proxy][bg] Failed to refresh local proxy memory cache: %v", err)
+		}
+	}()
 
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte("Package deleted successfully"))
+	_, _ = w.Write([]byte("Package deleted logically and written to OCI"))
+}
+
+func (s *Server) StartPreflightProbe() {
+	s.canDelete = true
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		s.canDelete = s.probeWriteCapability(ctx)
+	}()
+}
+
+func (s *Server) probeWriteCapability(ctx context.Context) bool {
+	resp, err := s.client.RawRequest(ctx, "PUT", "/manifests/noci-probe-write", nil, "")
+	if err != nil {
+		errStr := strings.ToLower(err.Error())
+		if strings.Contains(errStr, "401") || strings.Contains(errStr, "403") ||
+			strings.Contains(errStr, "unauthorized") || strings.Contains(errStr, "forbidden") {
+			log.Warning("[noci-proxy] OCI Registry write capability: DISABLED (read-only token)")
+			return false
+		}
+	}
+	if resp != nil {
+		defer resp.Body.Close()
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			log.Warning("[noci-proxy] OCI Registry write capability: DISABLED (Status %d)", resp.StatusCode)
+			return false
+		}
+	}
+	log.Info("[noci-proxy] OCI Registry write capability: ENABLED")
+	return true
 }

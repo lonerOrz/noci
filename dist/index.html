@@ -29,7 +29,6 @@
             OCI Repository: --
           </p>
         </div>
-        <!-- 状态指示灯锚点 -->
         <div
           class="mt-4 md:mt-0 flex items-center gap-3"
           id="status-badge"
@@ -59,7 +58,7 @@
           </div>
           <button
             onclick="copyCmd(event)"
-            class="flex-shrink-0 rounded-lg bg-slate-800 hover:bg-indigo-600 px-4 py-2 text-xs font-semibold text-slate-200 hover:text-white transition-all border border-slate-700 select-none cursor-pointer"
+            class="flex-shrink-0 rounded-lg bg-slate-800 hover:bg-indigo-600 px-4 py-2 text-xs font-semibold text-slate-200 hover:text-white border border-slate-700 select-none cursor-pointer btn-polish"
           >
             Copy
           </button>
@@ -68,7 +67,7 @@
 
       <div class="grid grid-cols-1 gap-6 sm:grid-cols-3 mb-10 select-none">
         <div
-          class="rounded-2xl border border-slate-800/80 bg-slate-950 p-6 shadow-xl transition-all hover:scale-[1.01] hover:border-indigo-500/30"
+          class="rounded-2xl border border-slate-800/80 bg-slate-950 p-6 shadow-xl card-polish hover:scale-[1.01] hover:border-indigo-500/30"
         >
           <dt
             class="text-xs font-semibold uppercase tracking-wider text-slate-500 flex items-center gap-2"
@@ -83,7 +82,7 @@
           </dd>
         </div>
         <div
-          class="rounded-2xl border border-slate-800/80 bg-slate-950 p-6 shadow-xl transition-all hover:scale-[1.01] hover:border-emerald-500/30"
+          class="rounded-2xl border border-slate-800/80 bg-slate-950 p-6 shadow-xl card-polish hover:scale-[1.01] hover:border-emerald-500/30"
         >
           <dt
             class="text-xs font-semibold uppercase tracking-wider text-slate-500 flex items-center gap-2"
@@ -98,7 +97,7 @@
           </dd>
         </div>
         <div
-          class="rounded-2xl border border-slate-800/80 bg-slate-950 p-6 shadow-xl transition-all hover:scale-[1.01] hover:border-sky-500/30"
+          class="rounded-2xl border border-slate-800/80 bg-slate-950 p-6 shadow-xl card-polish hover:scale-[1.01] hover:border-sky-500/30"
         >
           <dt
             class="text-xs font-semibold uppercase tracking-wider text-slate-500 flex items-center gap-2"
@@ -137,7 +136,7 @@
             type="text"
             id="search-input"
             placeholder="Search packages by name, store path, or hash..."
-            class="block w-full rounded-xl border border-slate-800/80 bg-slate-950 py-3.5 pl-11 pr-4 text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 sm:text-sm transition-all shadow-inner cursor-text select-text"
+            class="block w-full rounded-xl border border-slate-800/80 bg-slate-950 py-3.5 pl-11 pr-4 text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 sm:text-sm transition-colors duration-200 cursor-text select-text"
           />
         </div>
       </div>
@@ -145,7 +144,7 @@
       <div
         class="overflow-hidden shadow-2xl rounded-2xl border border-slate-800 bg-slate-950"
       >
-        <div class="overflow-x-auto">
+        <div class="overflow-x-auto custom-scrollbar">
           <table class="min-w-full divide-y divide-slate-800 select-none">
             <thead class="bg-slate-900/60">
               <tr>
@@ -170,6 +169,7 @@
                   Uploaded At
                 </th>
                 <th
+                  id="actions-header"
                   class="px-3 py-4 text-right pr-6 text-xs font-bold text-slate-400 uppercase tracking-wider"
                 >
                   Actions
