@@ -9,6 +9,8 @@ import (
 	"noci/dist"
 	"noci/pkg/log"
 	"noci/pkg/oci"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -339,6 +341,23 @@ func (s *Server) handleAPIDigest(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(digest))
 }
 
+type PaginatedResponse struct {
+	Total       int              `json:"total"`
+	Page        int              `json:"page"`
+	Limit       int              `json:"limit"`
+	CanDelete   bool             `json:"canDelete"`
+	Repo        string           `json:"repo"`
+	Registry    string           `json:"registry"`
+	GlobalCount int64            `json:"globalCount"`
+	GlobalSize  int64            `json:"globalSize"`
+	Entries     []PaginatedEntry `json:"entries"`
+}
+
+type PaginatedEntry struct {
+	Hash string `json:"hash"`
+	oci.IndexItem
+}
+
 func (s *Server) handleAPIIndex(w http.ResponseWriter, r *http.Request) {
 	setSource(w, "cache")
 	w.Header().Set("Content-Type", "application/json")
@@ -350,13 +369,74 @@ func (s *Server) handleAPIIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	response := struct {
-		*oci.CacheIndex
-		CanDelete bool `json:"canDelete"`
-	}{
-		CacheIndex: s.index,
-		CanDelete:  s.canDelete,
+	var globalSize int64
+	for _, entry := range s.index.Entries {
+		globalSize += entry.NarSize
 	}
+	globalCount := int64(len(s.index.Entries))
+
+	query := r.URL.Query()
+
+	page := 1
+	if pStr := query.Get("page"); pStr != "" {
+		if p, err := strconv.Atoi(pStr); err == nil && p > 0 {
+			page = p
+		}
+	}
+
+	limit := 50
+	if lStr := query.Get("limit"); lStr != "" {
+		if l, err := strconv.Atoi(lStr); err == nil && l > 0 {
+			limit = l
+		}
+	}
+
+	search := strings.ToLower(strings.TrimSpace(query.Get("search")))
+
+	var filtered []PaginatedEntry
+	for hash, entry := range s.index.Entries {
+		if search != "" {
+			nameMatch := strings.Contains(strings.ToLower(entry.Name), search)
+			hashMatch := strings.Contains(strings.ToLower(hash), search)
+			if !nameMatch && !hashMatch {
+				continue
+			}
+		}
+		filtered = append(filtered, PaginatedEntry{
+			Hash:      hash,
+			IndexItem: entry,
+		})
+	}
+
+	sort.Slice(filtered, func(i, j int) bool {
+		return filtered[i].Added.After(filtered[j].Added)
+	})
+
+	total := len(filtered)
+	startIndex := (page - 1) * limit
+	endIndex := startIndex + limit
+
+	if startIndex > total {
+		startIndex = total
+	}
+	if endIndex > total {
+		endIndex = total
+	}
+
+	pageEntries := filtered[startIndex:endIndex]
+
+	response := PaginatedResponse{
+		Total:       total,
+		Page:        page,
+		Limit:       limit,
+		CanDelete:   s.canDelete,
+		Repo:        s.index.Repo,
+		Registry:    s.index.Registry,
+		GlobalCount: globalCount,
+		GlobalSize:  globalSize,
+		Entries:     pageEntries,
+	}
+
 	_ = json.NewEncoder(w).Encode(response)
 }
 
