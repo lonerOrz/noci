@@ -8,7 +8,6 @@ import (
 	"noci/pkg/log"
 	"noci/pkg/nix"
 	"noci/pkg/oci"
-	"os"
 	"strings"
 	"sync"
 )
@@ -236,16 +235,18 @@ func (p *Publisher) Publish(ctx context.Context, inputPaths []string) error {
 func (p *Publisher) publishSingle(ctx context.Context, info nix.PathInfo) (uploadResult, error) {
 	log.Action("Processing: %s", info.Path)
 
-	narFile, fileHash, fileSize, err := nix.ExportAndCompress(ctx, info.Path, p.comp, p.jobs)
+	stream, err := nix.ExportAndCompressStream(ctx, info.Path, p.comp, p.jobs)
 	if err != nil {
 		return uploadResult{}, fmt.Errorf("export failed: %w", err)
 	}
-	defer os.Remove(narFile)
+	defer stream.Close()
 
-	digest, err := p.client.UploadBlob(ctx, narFile, fileHash, "NAR")
+	digest, fileSize, err := p.client.UploadBlobStream(ctx, stream, "NAR")
 	if err != nil {
 		return uploadResult{}, fmt.Errorf("upload blob failed: %w", err)
 	}
+
+	fileHash := strings.TrimPrefix(digest, "sha256:")
 
 	normalizedNarHash, err := nix.NormalizeNarHash(info.NarHash)
 	if err != nil {

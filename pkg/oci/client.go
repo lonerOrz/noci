@@ -571,6 +571,131 @@ func (c *Client) UploadBlob(ctx context.Context, filePath, sha256Hex, descriptio
 	return digest, nil
 }
 
+func (c *Client) UploadBlobStream(ctx context.Context, r io.Reader, description string) (digest string, size int64, err error) {
+	token, tErr := c.getOciToken(ctx, "pull,push")
+	if tErr != nil {
+		return "", 0, tErr
+	}
+
+	initResp, err := c.Request(ctx, "POST", "/blobs/uploads/", nil, "")
+	if err != nil {
+		return "", 0, err
+	}
+	defer initResp.Body.Close()
+
+	if initResp.StatusCode != http.StatusAccepted && initResp.StatusCode != http.StatusCreated {
+		bodyBytes, _ := io.ReadAll(initResp.Body)
+		return "", 0, fmt.Errorf("failed to initiate blob upload (HTTP %d): %s", initResp.StatusCode, string(bodyBytes))
+	}
+
+	uploadLocation := initResp.Header.Get("Location")
+	if uploadLocation == "" {
+		return "", 0, fmt.Errorf("registry didn't return upload location")
+	}
+
+	u, err := url.Parse(uploadLocation)
+	if err != nil {
+		return "", 0, fmt.Errorf("invalid upload location URL: %w", err)
+	}
+	if !u.IsAbs() {
+		base, _ := url.Parse(fmt.Sprintf("https://%s", c.registry))
+		u = base.ResolveReference(u)
+	}
+	uploadURL := u.String()
+
+	hasher := sha256.New()
+	teeReader := io.TeeReader(r, hasher)
+
+	chunkSize := 8 * 1024 * 1024
+	buf := make([]byte, chunkSize)
+	var total int64
+	isTTY := term.IsTerminal(int(os.Stderr.Fd()))
+	lastPrint := time.Time{}
+
+	for {
+		n, readErr := teeReader.Read(buf)
+		if n > 0 {
+			patchReq, pErr := http.NewRequestWithContext(ctx, "PATCH", uploadURL, bytes.NewReader(buf[:n]))
+			if pErr != nil {
+				return "", total, fmt.Errorf("failed to create PATCH request: %w", pErr)
+			}
+			patchReq.Header.Set("Authorization", "Bearer "+token)
+			patchReq.Header.Set("Content-Type", "application/octet-stream")
+			patchReq.ContentLength = int64(n)
+
+			patchResp, pErr := c.client.Do(patchReq)
+			if pErr != nil {
+				return "", total, fmt.Errorf("chunk upload failed: %w", pErr)
+			}
+			patchResp.Body.Close()
+
+			if patchResp.StatusCode != http.StatusAccepted && patchResp.StatusCode != http.StatusNoContent && patchResp.StatusCode != http.StatusOK {
+				return "", total, fmt.Errorf("chunk upload failed: HTTP %d", patchResp.StatusCode)
+			}
+
+			total += int64(n)
+
+			if isTTY {
+				now := time.Now()
+				if lastPrint.IsZero() || readErr != nil || now.Sub(lastPrint) >= 200*time.Millisecond {
+					fmt.Fprintf(os.Stderr, "\r\u001b[K▶ [noci] Uploading %s... %s", description, FormatSize(total))
+					lastPrint = now
+				}
+			}
+		}
+
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			return "", total, readErr
+		}
+	}
+
+	if isTTY {
+		fmt.Fprintln(os.Stderr)
+	}
+
+	computedDigest := "sha256:" + hex.EncodeToString(hasher.Sum(nil))
+
+	headResp, headErr := c.Request(ctx, "HEAD", "/blobs/"+computedDigest, nil, "")
+	if headErr == nil {
+		headResp.Body.Close()
+		if headResp.StatusCode == http.StatusOK {
+			return computedDigest, total, nil
+		}
+	} else if headResp != nil {
+		headResp.Body.Close()
+	}
+
+	u, _ = url.Parse(uploadURL)
+	q := u.Query()
+	q.Set("digest", computedDigest)
+	u.RawQuery = q.Encode()
+	finalURL := u.String()
+
+	putReq, err := http.NewRequestWithContext(ctx, "PUT", finalURL, http.NoBody)
+	if err != nil {
+		return "", total, err
+	}
+	putReq.Header.Set("Authorization", "Bearer "+token)
+	putReq.Header.Set("Content-Type", "application/octet-stream")
+	putReq.ContentLength = 0
+
+	putResp, err := c.client.Do(putReq)
+	if err != nil {
+		return "", total, err
+	}
+	defer putResp.Body.Close()
+
+	if putResp.StatusCode != http.StatusCreated && putResp.StatusCode != http.StatusAccepted {
+		bodyBytes, _ := io.ReadAll(putResp.Body)
+		return "", total, fmt.Errorf("failed to finalize upload: HTTP %d, %s", putResp.StatusCode, string(bodyBytes))
+	}
+
+	return computedDigest, total, nil
+}
+
 func (c *Client) downloadBlob(ctx context.Context, digest string) ([]byte, error) {
 	resp, err := c.Request(ctx, "GET", "/blobs/"+digest, nil, "")
 	if err != nil {
