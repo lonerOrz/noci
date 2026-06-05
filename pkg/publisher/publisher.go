@@ -132,6 +132,7 @@ func (p *Publisher) Publish(ctx context.Context, inputPaths []string) error {
 		if res.exists {
 			if err := p.client.RepairIndexEntry(ctx, res.hash, index); err != nil {
 				log.Warning("Failed to repair index entry for %s: %v", res.hash, err)
+				uncachedPaths = append(uncachedPaths, res.path)
 			} else {
 				repairCount++
 			}

@@ -407,17 +407,46 @@ func parseNextLink(link string) string {
 	return ""
 }
 
-func (c *Client) DeleteManifest(ctx context.Context, digest string) error {
-	resp, err := c.Request(ctx, "DELETE", "/manifests/"+digest, nil, "")
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted && resp.StatusCode != http.StatusNotFound {
+// DeleteManifest 策略分流式物理删除
+func (c *Client) DeleteManifest(ctx context.Context, tag string) error {
+	// 尝试符合标准 OCI 协议的 DELETE 请求 (Harbor, GitLab, ECR 支持)
+	resp, err := c.Request(ctx, "DELETE", "/manifests/"+tag, nil, "")
+	if err == nil {
+		defer resp.Body.Close()
+		if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusAccepted || resp.StatusCode == http.StatusNotFound {
+			return nil
+		}
+		// 返回 405 Method Not Allowed，说明注册表禁用了该方法 (如 GHCR)
+		if resp.StatusCode == http.StatusMethodNotAllowed {
+			return c.fallbackUntagManifest(ctx, tag)
+		}
 		return fmt.Errorf("delete manifest failed: HTTP %d", resp.StatusCode)
 	}
-	return nil
+	return err
+}
+
+// 重置/覆盖 Tag 指针，达到 logical untagged 物理垃圾悬空
+func (c *Client) fallbackUntagManifest(ctx context.Context, tag string) error {
+	if c.Profile {
+		log.Info("[profile] OCI DELETE blocked (405). Falling back to tag-overwriting (untagging) for tag: %s", tag)
+	}
+
+	// 向原有的 Nix 32位 哈希标签推送一个极小的 Dummy 空清单
+	// 这会立即解绑原先的 NAR Manifest，使其退化为 "untagged" (悬空无标签) 状态。
+	dummyManifest := OCIManifest{
+		SchemaVersion: 2,
+		MediaType:     "application/vnd.oci.image.manifest.v1+json",
+		Config: Descriptor{
+			MediaType: "application/vnd.noci.dummy.config.v1+json",
+			Size:      2,
+			Digest:    "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+		},
+		Annotations: map[string]string{
+			"org.nix.evicted": "true",
+		},
+	}
+
+	return c.PushManifest(ctx, tag, &dummyManifest)
 }
 
 func (c *Client) FetchIndex(ctx context.Context) (*CacheIndex, error) {
