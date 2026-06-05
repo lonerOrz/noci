@@ -37,3 +37,4 @@ jobs:
           package_name: "nix-cache" # noci 统一
           owner_type: ${{ github.event.repository.owner.type == 'Organization' && 'org' || 'user' }}
           untagged_only: true
+          except_untagged_multiplatform: false
