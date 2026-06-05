@@ -31,3 +31,16 @@ jobs:
       - name: Build Flake Target
         run: |
           nix build github:lonerOrz/loneros-nur#wooz --no-link -L
+
+      - name: Build and Time Upload Real ISO
+        run: |
+          ISO_PATH=$(nix build github:lonerOrz/loneros-nixos#packages.x86_64-linux.iso --print-out-paths --no-link -L)
+
+          nix path-info -sh "$ISO_PATH"
+
+          /tmp/noci push "$ISO_PATH" --profile
+        env:
+          NOCI_REGISTRY: ${{ secrets.NOCI_REGISTRY || 'ghcr.io' }}
+          NOCI_REPO: ${{ secrets.NOCI_REPO || 'lonerOrz/noci-cache' }}
+          NOCI_SIGNING_KEY: ${{ secrets.NOCI_SIGNING_KEY }}
+          NOCI_TOKEN: ${{ secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
