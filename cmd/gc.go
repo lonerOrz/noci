@@ -5,7 +5,6 @@ import (
 	"noci/pkg/gc"
 	"noci/pkg/log"
 	"noci/pkg/oci"
-	"strings"
 	"sync"
 	"time"
 
@@ -31,7 +30,7 @@ func init() {
 	gcCmd.Flags().BoolVar(&gcDryRun, "dry-run", true, "Perform dry-run without writing back to OCI")
 	gcCmd.Flags().StringVar(&gcMaxSize, "max-size", "", "Storage budget cap (e.g., '10GB', '500MB')")
 	gcCmd.Flags().StringVar(&gcGracePeriod, "grace-period", "6h", "Safety grace period for newly uploaded files")
-	gcCmd.Flags().BoolVar(&gcPhysicalSweep, "physical-sweep", false, "Physically delete OCI blobs (requires token write/delete permissions)")
+	gcCmd.Flags().BoolVar(&gcPhysicalSweep, "physical-sweep", false, "Physically prune evicted OCI manifests (supports tag-overwriting on GHCR)")
 
 	RootCmd.AddCommand(gcCmd)
 }
@@ -114,32 +113,26 @@ func runGC(cmd *cobra.Command, args []string) error {
 	}
 
 	if gcPhysicalSweep && len(sweepList) > 0 {
-		log.Action("Sweeping blobs concurrently (8 workers)...")
+		log.Action("Physically pruning evicted manifests concurrently (8 workers)...")
 		sem := make(chan struct{}, 8)
 		var wg sync.WaitGroup
-		var warnOnce sync.Once
 
 		for _, sweep := range sweepList {
 			sem <- struct{}{}
 			wg.Add(1)
 
-			go func(digest, key string) {
+			go func(key string) {
 				defer func() {
 					<-sem
 					wg.Done()
 				}()
-				log.Action("Deleting blob: %s", key)
-				if err := client.DeleteBlob(ctx, "sha256:"+digest); err != nil {
-					errMsg := err.Error()
-					if strings.Contains(errMsg, "405") || strings.Contains(errMsg, "UNSUPPORTED") {
-						warnOnce.Do(func() {
-							log.Warning("Blob deletion unsupported (405). Skipping remaining.")
-						})
-						return
-					}
-					log.Warning("Failed to delete blob sha256:%s: %v", digest, err)
+				log.Action("Pruning physical manifest tag: %s", key)
+				if err := client.DeleteManifest(ctx, key); err != nil {
+					log.Warning("Failed to prune physical manifest tag %s: %v", key, err)
+				} else {
+					log.Success("Successfully pruned physical manifest tag: %s", key)
 				}
-			}(sweep.digest, sweep.key)
+			}(sweep.key)
 		}
 		wg.Wait()
 	}
