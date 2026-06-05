@@ -5,6 +5,7 @@ on:
       - "action/**"
       - "go.**"
       - "**.go"
+      - ".github/workflows/noci-test.yml"
   workflow_dispatch:
 
 jobs:
@@ -38,7 +39,7 @@ jobs:
 
           nix path-info -sh "$ISO_PATH"
 
-          /tmp/noci push "$ISO_PATH" --profile
+          nix run github:lonerOrz/noci#noci -- push "$ISO_PATH" --profile
         env:
           NOCI_REGISTRY: ${{ secrets.NOCI_REGISTRY || 'ghcr.io' }}
           NOCI_REPO: ${{ secrets.NOCI_REPO || 'lonerOrz/noci-cache' }}
