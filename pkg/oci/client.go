@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"noci/pkg/log"
 	"os"
 	"strings"
 	"sync"
@@ -44,6 +45,7 @@ type Client struct {
 	ociTokenPush  string
 	pushFetchTime time.Time
 	client        *http.Client
+	Profile       bool
 }
 
 func NewClient(registry, repo, token string) *Client {
@@ -61,7 +63,6 @@ func NewClient(registry, repo, token string) *Client {
 		repo:     strings.ToLower(repo),
 		token:    token,
 		client: &http.Client{
-			Timeout:   5 * time.Minute,
 			Transport: transport,
 		},
 	}
@@ -235,6 +236,36 @@ func (c *Client) FetchManifest(ctx context.Context, tag string) (*OCIManifest, e
 		return nil, err
 	}
 	return &manifest, nil
+}
+
+func (c *Client) RepairIndexEntry(ctx context.Context, hash string, index *CacheIndex) error {
+	manifest, err := c.FetchManifest(ctx, hash)
+	if err != nil {
+		return fmt.Errorf("fetch manifest %s: %w", hash, err)
+	}
+
+	if manifest.Annotations == nil {
+		return fmt.Errorf("manifest %s has no annotations", hash)
+	}
+
+	name := manifest.Annotations["org.nix.name"]
+	narinfo := manifest.Annotations["org.nix.narinfo"]
+	refsStr := manifest.Annotations["org.nix.references"]
+
+	var refs []string
+	if refsStr != "" {
+		refs = strings.Split(refsStr, ",")
+	}
+
+	if len(manifest.Layers) == 0 {
+		return fmt.Errorf("manifest %s has no layers", hash)
+	}
+
+	digest := manifest.Layers[0].Digest
+	size := manifest.Layers[0].Size
+
+	index.AddEntry(hash, name, narinfo, digest, size, refs)
+	return nil
 }
 
 func (c *Client) PushManifest(ctx context.Context, tag string, manifest *OCIManifest) error {
@@ -440,6 +471,7 @@ func (c *Client) FetchIndex(ctx context.Context) (*CacheIndex, error) {
 }
 
 func (c *Client) PushIndex(ctx context.Context, idx *CacheIndex) error {
+	pushStart := time.Now()
 	idx.Generated = time.Now()
 	data, err := json.Marshal(idx)
 	if err != nil {
@@ -467,6 +499,8 @@ func (c *Client) PushIndex(ctx context.Context, idx *CacheIndex) error {
 		return err
 	}
 
+	log.Action("Uploading index...")
+
 	digest, err := c.UploadBlob(ctx, tmp.Name(), hex.EncodeToString(h.Sum(nil)), "index")
 	if err != nil {
 		return err
@@ -491,7 +525,14 @@ func (c *Client) PushIndex(ctx context.Context, idx *CacheIndex) error {
 			"org.nix.index.generated_at": time.Now().UTC().Format(time.RFC3339),
 		},
 	}
-	return c.PushManifest(ctx, "noci-index", &indexManifest)
+	if err := c.PushManifest(ctx, "noci-index", &indexManifest); err != nil {
+		return err
+	}
+
+	if c.Profile {
+		log.Info("[profile] PushIndex: total=%v", time.Since(pushStart))
+	}
+	return nil
 }
 
 func (c *Client) UploadBlob(ctx context.Context, filePath, sha256Hex, description string) (string, error) {
@@ -569,6 +610,112 @@ func (c *Client) UploadBlob(ctx context.Context, filePath, sha256Hex, descriptio
 
 	fmt.Printf("\r\x1b[K✔ [noci] Uploaded %s (%s).\n", description, FormatSize(stat.Size()))
 	return digest, nil
+}
+
+func (c *Client) UploadBlobMonolithic(ctx context.Context, filePath, sha256Hex, description string) (digest string, size int64, err error) {
+	uploadStart := time.Now()
+
+	digest = "sha256:" + sha256Hex
+
+	file, err := os.Open(filePath)
+	if err != nil {
+		return "", 0, fmt.Errorf("failed to open blob file: %w", err)
+	}
+	defer file.Close()
+
+	stat, err := file.Stat()
+	if err != nil {
+		return "", 0, fmt.Errorf("failed to stat blob file: %w", err)
+	}
+	size = stat.Size()
+
+	headCtx, headCancel := context.WithTimeout(ctx, 30*time.Second)
+	defer headCancel()
+	if headResp, headErr := c.Request(headCtx, "HEAD", "/blobs/"+digest, nil, ""); headErr == nil {
+		headResp.Body.Close()
+		if headResp.StatusCode == http.StatusOK {
+			if c.Profile {
+				log.Info("[profile] Blob %s already exists (HEAD), skipped", sha256Hex[:12])
+			}
+			return digest, size, nil
+		}
+	} else if headResp != nil {
+		headResp.Body.Close()
+	}
+
+	token, err := c.getOciToken(ctx, "pull,push")
+	if err != nil {
+		return "", 0, err
+	}
+
+	initResp, err := c.Request(ctx, "POST", "/blobs/uploads/", nil, "")
+	if err != nil {
+		return "", 0, err
+	}
+	defer initResp.Body.Close()
+
+	if initResp.StatusCode != http.StatusAccepted && initResp.StatusCode != http.StatusCreated {
+		bodyBytes, _ := io.ReadAll(initResp.Body)
+		return "", 0, fmt.Errorf("failed to initiate blob upload (HTTP %d): %s", initResp.StatusCode, string(bodyBytes))
+	}
+
+	uploadLocation := initResp.Header.Get("Location")
+	if uploadLocation == "" {
+		return "", 0, fmt.Errorf("registry didn't return upload location")
+	}
+
+	u, err := url.Parse(uploadLocation)
+	if err != nil {
+		return "", 0, fmt.Errorf("invalid upload location URL: %w", err)
+	}
+	if !u.IsAbs() {
+		base, _ := url.Parse(fmt.Sprintf("https://%s", c.registry))
+		u = base.ResolveReference(u)
+	}
+	uploadURL := u.String()
+
+	uploadURL += "?digest=" + digest
+
+	isTTY := term.IsTerminal(int(os.Stderr.Fd()))
+	if isTTY {
+		fmt.Fprintf(os.Stderr, "\r\u001b[K▶ [noci] Uploading %s... %s", description, FormatSize(size))
+	}
+
+	putReq, err := http.NewRequestWithContext(ctx, "PUT", uploadURL, file)
+	if err != nil {
+		return "", 0, fmt.Errorf("failed to create PUT request: %w", err)
+	}
+	putReq.Header.Set("Authorization", "Bearer "+token)
+	putReq.Header.Set("Content-Type", "application/octet-stream")
+	putReq.ContentLength = size
+
+	startNet := time.Now()
+	putResp, err := c.client.Do(putReq)
+	netTime := time.Since(startNet)
+
+	if err != nil {
+		return "", 0, fmt.Errorf("monolithic upload failed: %w", err)
+	}
+	defer putResp.Body.Close()
+
+	if isTTY {
+		fmt.Fprintln(os.Stderr)
+	}
+
+	if putResp.StatusCode != http.StatusCreated && putResp.StatusCode != http.StatusAccepted {
+		bodyBytes, _ := io.ReadAll(putResp.Body)
+		return "", 0, fmt.Errorf("monolithic upload failed: HTTP %d, %s", putResp.StatusCode, string(bodyBytes))
+	}
+
+	if c.Profile {
+		totalElapsed := time.Since(uploadStart)
+		log.Info("[profile] Upload %s: total=%v net=%v (net %.1f%%) size=%s",
+			description, totalElapsed, netTime,
+			float64(netTime)/float64(totalElapsed)*100,
+			FormatSize(size))
+	}
+
+	return digest, size, nil
 }
 
 func (c *Client) downloadBlob(ctx context.Context, digest string) ([]byte, error) {

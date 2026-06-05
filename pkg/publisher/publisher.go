@@ -11,6 +11,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 )
 
 type Publisher struct {
@@ -18,10 +19,12 @@ type Publisher struct {
 	signer       *nix.Signer
 	skipUpstream bool
 	comp         string
+	compLevel    int
 	jobs         int
+	Profile      bool
 }
 
-func NewPublisher(client *oci.Client, signer *nix.Signer, skipUpstream bool, comp string, jobs int) *Publisher {
+func NewPublisher(client *oci.Client, signer *nix.Signer, skipUpstream bool, comp string, compLevel int, jobs int) *Publisher {
 	if client == nil || signer == nil {
 		panic("publisher: client and signer must not be nil")
 	}
@@ -30,6 +33,7 @@ func NewPublisher(client *oci.Client, signer *nix.Signer, skipUpstream bool, com
 		signer:       signer,
 		skipUpstream: skipUpstream,
 		comp:         comp,
+		compLevel:    compLevel,
 		jobs:         jobs,
 	}
 }
@@ -44,6 +48,11 @@ type uploadResult struct {
 }
 
 func (p *Publisher) Publish(ctx context.Context, inputPaths []string) error {
+	totalStart := time.Now()
+	var t0, t1, t2, t3, t4, t5, t6 time.Time
+
+	t0 = time.Now()
+
 	if p.signer != nil {
 		pubKey := p.signer.PrivateKey.Public().(ed25519.PublicKey)
 		publicKeyStr := fmt.Sprintf("%s:%s",
@@ -65,31 +74,94 @@ func (p *Publisher) Publish(ctx context.Context, inputPaths []string) error {
 		_ = p.client.PushManifest(ctx, "public-key", &pubManifest)
 	}
 
+	t1 = time.Now()
 	index, err := p.client.FetchIndex(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to load index: %w", err)
 	}
 
+	t2 = time.Now()
 	log.Action("Evaluating closure for %d paths...", len(inputPaths))
 	closure, err := nix.GetClosure(ctx, inputPaths)
 	if err != nil {
 		return fmt.Errorf("failed to get closure: %w", err)
 	}
 
-	var uncachedPaths []string
+	t3 = time.Now()
+	var missing []struct {
+		path string
+		hash string
+	}
 	for _, path := range closure {
 		hash := nix.GetPathHash(path)
-		if _, exists := index.Entries[hash]; exists {
+		if _, exists := index.Entries[hash]; !exists {
+			missing = append(missing, struct {
+				path string
+				hash string
+			}{path, hash})
+		}
+	}
+
+	type checkResult struct {
+		hash   string
+		path   string
+		exists bool
+	}
+	resultChan := make(chan checkResult, len(missing))
+	checkSem := make(chan struct{}, 8)
+	var checkWg sync.WaitGroup
+
+	for _, m := range missing {
+		checkSem <- struct{}{}
+		checkWg.Add(1)
+		go func(path, hash string) {
+			defer func() {
+				<-checkSem
+				checkWg.Done()
+			}()
+			exists, _ := p.client.ManifestExists(ctx, hash)
+			resultChan <- checkResult{hash: hash, path: path, exists: exists}
+		}(m.path, m.hash)
+	}
+	checkWg.Wait()
+	close(resultChan)
+
+	var uncachedPaths []string
+	var repairCount int
+	for res := range resultChan {
+		if res.exists {
+			if err := p.client.RepairIndexEntry(ctx, res.hash, index); err != nil {
+				log.Warning("Failed to repair index entry for %s: %v", res.hash, err)
+			} else {
+				repairCount++
+			}
 			continue
 		}
-		uncachedPaths = append(uncachedPaths, path)
+		uncachedPaths = append(uncachedPaths, res.path)
+	}
+
+	if repairCount > 0 {
+		if err := p.client.PushIndex(ctx, index); err != nil {
+			return fmt.Errorf("failed to push repaired index: %w", err)
+		}
+		log.Success("Repaired %d stale index entries.", repairCount)
 	}
 
 	if len(uncachedPaths) == 0 {
+		if p.Profile {
+			t4 = time.Now()
+			log.Info("[profile] Publish pipeline:")
+			log.Info("  - Sign/PushManifest: %v", t1.Sub(t0))
+			log.Info("  - FetchIndex:        %v", t2.Sub(t1))
+			log.Info("  - GetClosure:        %v", t3.Sub(t2))
+			log.Info("  - Check+repair:      %v", t4.Sub(t3))
+			log.Info("  - Total:             %v", time.Since(totalStart))
+		}
 		log.Success("All packages are already cached!")
 		return nil
 	}
 
+	t4 = time.Now()
 	infos, err := nix.GetPathInfos(ctx, uncachedPaths)
 	if err != nil {
 		return fmt.Errorf("failed to get path infos: %w", err)
@@ -125,6 +197,16 @@ func (p *Publisher) Publish(ctx context.Context, inputPaths []string) error {
 	}
 
 	if len(uploadList) == 0 {
+		if p.Profile {
+			t5 = time.Now()
+			log.Info("[profile] Publish pipeline:")
+			log.Info("  - Sign/PushManifest: %v", t1.Sub(t0))
+			log.Info("  - FetchIndex:        %v", t2.Sub(t1))
+			log.Info("  - GetClosure:        %v", t3.Sub(t2))
+			log.Info("  - Check+repair:      %v", t4.Sub(t3))
+			log.Info("  - GetPathInfos:      %v", t5.Sub(t4))
+			log.Info("  - Total:             %v", time.Since(totalStart))
+		}
 		log.Success("All packages are already cached!")
 		return nil
 	}
@@ -208,6 +290,7 @@ func (p *Publisher) Publish(ctx context.Context, inputPaths []string) error {
 		}(info)
 	}
 
+	t5 = time.Now()
 	wg.Wait()
 	close(outcomeChan)
 
@@ -215,7 +298,7 @@ func (p *Publisher) Publish(ctx context.Context, inputPaths []string) error {
 		return firstErr
 	}
 
-	// Late Merge: upload 完成后重新拉取最新索引，消除并发冲突风险
+	t6 = time.Now()
 	freshIndex, err := p.client.FetchIndex(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to re-fetch index for late merge: %w", err)
@@ -229,6 +312,18 @@ func (p *Publisher) Publish(ctx context.Context, inputPaths []string) error {
 		return fmt.Errorf("failed to push updated index: %w", err)
 	}
 
+	if p.Profile {
+		log.Info("[profile] Publish pipeline:")
+		log.Info("  - Sign/PushManifest: %v", t1.Sub(t0))
+		log.Info("  - FetchIndex:        %v", t2.Sub(t1))
+		log.Info("  - GetClosure:        %v", t3.Sub(t2))
+		log.Info("  - Check+repair:      %v", t4.Sub(t3))
+		log.Info("  - GetPathInfos:      %v", t5.Sub(t4))
+		log.Info("  - Upload+PushManifest: %v", t6.Sub(t5))
+		log.Info("  - LateMerge:         %v", time.Since(t6))
+		log.Info("  - Total:             %v", time.Since(totalStart))
+	}
+
 	log.Success("Cached %d packages successfully.", len(uploadList))
 	return nil
 }
@@ -236,16 +331,31 @@ func (p *Publisher) Publish(ctx context.Context, inputPaths []string) error {
 func (p *Publisher) publishSingle(ctx context.Context, info nix.PathInfo) (uploadResult, error) {
 	log.Action("Processing: %s", info.Path)
 
-	narFile, fileHash, fileSize, err := nix.ExportAndCompress(ctx, info.Path, p.comp, p.jobs)
+	exportStart := time.Now()
+
+	tempFile, fileHash, fileSize, err := nix.ExportAndCompress(ctx, info.Path, p.comp, p.jobs, p.compLevel)
 	if err != nil {
 		return uploadResult{}, fmt.Errorf("export failed: %w", err)
 	}
-	defer os.Remove(narFile)
+	defer os.Remove(tempFile)
+	exportDuration := time.Since(exportStart)
 
-	digest, err := p.client.UploadBlob(ctx, narFile, fileHash, "NAR")
+	digest, uploadSize, err := p.client.UploadBlobMonolithic(ctx, tempFile, fileHash, "NAR")
+
+	uploadDuration := time.Since(exportStart)
+	_ = uploadSize
+
 	if err != nil {
 		return uploadResult{}, fmt.Errorf("upload blob failed: %w", err)
 	}
+
+	if p.Profile {
+		log.Info("[profile] Path: %s (%s)", nix.GetPathName(info.Path), oci.FormatSize(fileSize))
+		log.Info("  - Export+compress: %v", exportDuration)
+		log.Info("  - Total (incl upload): %v", uploadDuration)
+	}
+
+	fileHash = strings.TrimPrefix(digest, "sha256:")
 
 	normalizedNarHash, err := nix.NormalizeNarHash(info.NarHash)
 	if err != nil {
