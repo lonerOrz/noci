@@ -613,12 +613,38 @@ func (c *Client) UploadBlob(ctx context.Context, filePath, sha256Hex, descriptio
 	return digest, nil
 }
 
-func (c *Client) UploadBlobStream(ctx context.Context, r io.Reader, description string) (digest string, size int64, err error) {
-	streamStart := time.Now()
+func (c *Client) UploadBlobMonolithic(ctx context.Context, filePath, sha256Hex, description string) (digest string, size int64, err error) {
+	uploadStart := time.Now()
 
-	token, tErr := c.getOciToken(ctx, "pull,push")
-	if tErr != nil {
-		return "", 0, tErr
+	digest = "sha256:" + sha256Hex
+
+	file, err := os.Open(filePath)
+	if err != nil {
+		return "", 0, fmt.Errorf("failed to open blob file: %w", err)
+	}
+	defer file.Close()
+
+	stat, err := file.Stat()
+	if err != nil {
+		return "", 0, fmt.Errorf("failed to stat blob file: %w", err)
+	}
+	size = stat.Size()
+
+	if headResp, headErr := c.Request(ctx, "HEAD", "/blobs/"+digest, nil, ""); headErr == nil {
+		headResp.Body.Close()
+		if headResp.StatusCode == http.StatusOK {
+			if c.Profile {
+				log.Info("[profile] Blob %s already exists (HEAD), skipped", sha256Hex[:12])
+			}
+			return digest, size, nil
+		}
+	} else if headResp != nil {
+		headResp.Body.Close()
+	}
+
+	token, err := c.getOciToken(ctx, "pull,push")
+	if err != nil {
+		return "", 0, err
 	}
 
 	initResp, err := c.Request(ctx, "POST", "/blobs/uploads/", nil, "")
@@ -647,119 +673,48 @@ func (c *Client) UploadBlobStream(ctx context.Context, r io.Reader, description 
 	}
 	uploadURL := u.String()
 
-	hasher := sha256.New()
-	teeReader := io.TeeReader(r, hasher)
+	uploadURL += "?digest=" + digest
 
-	chunkSize := 8 * 1024 * 1024
-	buf := make([]byte, chunkSize)
-	var total int64
-	var accumulatedNetTime time.Duration
 	isTTY := term.IsTerminal(int(os.Stderr.Fd()))
-	lastPrint := time.Time{}
-
-	for {
-		n, readErr := teeReader.Read(buf)
-		if n > 0 {
-			patchReq, pErr := http.NewRequestWithContext(ctx, "PATCH", uploadURL, bytes.NewReader(buf[:n]))
-			if pErr != nil {
-				return "", total, fmt.Errorf("failed to create PATCH request: %w", pErr)
-			}
-			patchReq.Header.Set("Authorization", "Bearer "+token)
-			patchReq.Header.Set("Content-Type", "application/octet-stream")
-			patchReq.ContentLength = int64(n)
-
-			startNet := time.Now()
-			patchResp, pErr := c.client.Do(patchReq)
-			accumulatedNetTime += time.Since(startNet)
-
-			if pErr != nil {
-				return "", total, fmt.Errorf("chunk upload failed: %w", pErr)
-			}
-			patchResp.Body.Close()
-
-			if patchResp.StatusCode != http.StatusAccepted && patchResp.StatusCode != http.StatusNoContent && patchResp.StatusCode != http.StatusOK {
-				return "", total, fmt.Errorf("chunk upload failed: HTTP %d", patchResp.StatusCode)
-			}
-
-			total += int64(n)
-
-			if isTTY {
-				now := time.Now()
-				if lastPrint.IsZero() || readErr != nil || now.Sub(lastPrint) >= 200*time.Millisecond {
-					fmt.Fprintf(os.Stderr, "\r\u001b[K▶ [noci] Uploading %s... %s", description, FormatSize(total))
-					lastPrint = now
-				}
-			}
-		}
-
-		if readErr == io.EOF {
-			break
-		}
-		if readErr != nil {
-			return "", total, readErr
-		}
+	if isTTY {
+		fmt.Fprintf(os.Stderr, "\r\u001b[K▶ [noci] Uploading %s... %s", description, FormatSize(size))
 	}
+
+	putReq, err := http.NewRequestWithContext(ctx, "PUT", uploadURL, file)
+	if err != nil {
+		return "", 0, fmt.Errorf("failed to create PUT request: %w", err)
+	}
+	putReq.Header.Set("Authorization", "Bearer "+token)
+	putReq.Header.Set("Content-Type", "application/octet-stream")
+	putReq.ContentLength = size
+
+	startNet := time.Now()
+	putResp, err := c.client.Do(putReq)
+	netTime := time.Since(startNet)
+
+	if err != nil {
+		return "", 0, fmt.Errorf("monolithic upload failed: %w", err)
+	}
+	defer putResp.Body.Close()
 
 	if isTTY {
 		fmt.Fprintln(os.Stderr)
 	}
 
-	computedDigest := "sha256:" + hex.EncodeToString(hasher.Sum(nil))
-
-	startNet := time.Now()
-	headResp, headErr := c.Request(ctx, "HEAD", "/blobs/"+computedDigest, nil, "")
-	accumulatedNetTime += time.Since(startNet)
-
-	if headErr == nil {
-		headResp.Body.Close()
-		if headResp.StatusCode == http.StatusOK {
-			if c.Profile {
-				totalElapsed := time.Since(streamStart)
-				log.Info("[profile] Upload %s already exists, skipped", description)
-				log.Info("  - Total: %v (net: %v, %.1f%%)", totalElapsed, accumulatedNetTime, float64(accumulatedNetTime)/float64(totalElapsed)*100)
-			}
-			return computedDigest, total, nil
-		}
-	} else if headResp != nil {
-		headResp.Body.Close()
-	}
-
-	u, _ = url.Parse(uploadURL)
-	q := u.Query()
-	q.Set("digest", computedDigest)
-	u.RawQuery = q.Encode()
-	finalURL := u.String()
-
-	putReq, err := http.NewRequestWithContext(ctx, "PUT", finalURL, http.NoBody)
-	if err != nil {
-		return "", total, err
-	}
-	putReq.Header.Set("Authorization", "Bearer "+token)
-	putReq.Header.Set("Content-Type", "application/octet-stream")
-	putReq.ContentLength = 0
-
-	startNet = time.Now()
-	putResp, err := c.client.Do(putReq)
-	accumulatedNetTime += time.Since(startNet)
-
-	if err != nil {
-		return "", total, err
-	}
-	defer putResp.Body.Close()
-
 	if putResp.StatusCode != http.StatusCreated && putResp.StatusCode != http.StatusAccepted {
 		bodyBytes, _ := io.ReadAll(putResp.Body)
-		return "", total, fmt.Errorf("failed to finalize upload: HTTP %d, %s", putResp.StatusCode, string(bodyBytes))
+		return "", 0, fmt.Errorf("monolithic upload failed: HTTP %d, %s", putResp.StatusCode, string(bodyBytes))
 	}
 
 	if c.Profile {
-		totalElapsed := time.Since(streamStart)
-		log.Info("[profile] Upload %s: total=%v net=%v (net %.1f%%)",
-			description, totalElapsed, accumulatedNetTime,
-			float64(accumulatedNetTime)/float64(totalElapsed)*100)
+		totalElapsed := time.Since(uploadStart)
+		log.Info("[profile] Upload %s: total=%v net=%v (net %.1f%%) size=%s",
+			description, totalElapsed, netTime,
+			float64(netTime)/float64(totalElapsed)*100,
+			FormatSize(size))
 	}
 
-	return computedDigest, total, nil
+	return digest, size, nil
 }
 
 func (c *Client) downloadBlob(ctx context.Context, digest string) ([]byte, error) {

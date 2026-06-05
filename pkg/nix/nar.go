@@ -19,7 +19,8 @@ import (
 
 // ExportAndCompress 流式将 nix-store 导出并动态选择压缩算法 (Context-Aware)
 // concurrency: zstd 编码器线程数，<=0 时自动设为 min(4, max(1, NumCPU/2))
-func ExportAndCompress(ctx context.Context, storePath string, comp string, concurrency int) (tempFile string, fileHash string, fileSize int64, err error) {
+// level: zstd 压缩等级 (1-19)，<=0 时默认 3
+func ExportAndCompress(ctx context.Context, storePath string, comp string, concurrency int, level int) (tempFile string, fileHash string, fileSize int64, err error) {
 	ext := ".nar.gz"
 	if comp == "zstd" {
 		ext = ".nar.zst"
@@ -50,7 +51,10 @@ func ExportAndCompress(ctx context.Context, storePath string, comp string, concu
 				concurrency = 4
 			}
 		}
-		compressor, err = zstd.NewWriter(multiWriter, zstd.WithEncoderConcurrency(concurrency))
+		if level <= 0 {
+			level = 3
+		}
+		compressor, err = zstd.NewWriter(multiWriter, zstd.WithEncoderConcurrency(concurrency), zstd.WithEncoderLevel(zstd.EncoderLevel(level)))
 	} else {
 		compressor = gzip.NewWriter(multiWriter)
 	}
@@ -97,7 +101,7 @@ func ExportAndCompress(ctx context.Context, storePath string, comp string, concu
 	return tempName, hex.EncodeToString(hashWriter.Sum(nil)), stat.Size(), nil
 }
 
-func ExportAndCompressStream(ctx context.Context, storePath, comp string, concurrency int) (io.ReadCloser, error) {
+func ExportAndCompressStream(ctx context.Context, storePath, comp string, concurrency int, level int) (io.ReadCloser, error) {
 	pr, pw := io.Pipe()
 
 	if concurrency <= 0 {
@@ -114,7 +118,10 @@ func ExportAndCompressStream(ctx context.Context, storePath, comp string, concur
 		var err error
 
 		if comp == "zstd" {
-			compressor, err = zstd.NewWriter(pw, zstd.WithEncoderConcurrency(concurrency))
+			if level <= 0 {
+				level = 3
+			}
+			compressor, err = zstd.NewWriter(pw, zstd.WithEncoderConcurrency(concurrency), zstd.WithEncoderLevel(zstd.EncoderLevel(level)))
 		} else {
 			compressor = gzip.NewWriter(pw)
 		}

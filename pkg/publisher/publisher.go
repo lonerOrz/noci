@@ -8,6 +8,7 @@ import (
 	"noci/pkg/log"
 	"noci/pkg/nix"
 	"noci/pkg/oci"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -18,11 +19,12 @@ type Publisher struct {
 	signer       *nix.Signer
 	skipUpstream bool
 	comp         string
+	compLevel    int
 	jobs         int
 	Profile      bool
 }
 
-func NewPublisher(client *oci.Client, signer *nix.Signer, skipUpstream bool, comp string, jobs int) *Publisher {
+func NewPublisher(client *oci.Client, signer *nix.Signer, skipUpstream bool, comp string, compLevel int, jobs int) *Publisher {
 	if client == nil || signer == nil {
 		panic("publisher: client and signer must not be nil")
 	}
@@ -31,6 +33,7 @@ func NewPublisher(client *oci.Client, signer *nix.Signer, skipUpstream bool, com
 		signer:       signer,
 		skipUpstream: skipUpstream,
 		comp:         comp,
+		compLevel:    compLevel,
 		jobs:         jobs,
 	}
 }
@@ -253,16 +256,19 @@ func (p *Publisher) Publish(ctx context.Context, inputPaths []string) error {
 func (p *Publisher) publishSingle(ctx context.Context, info nix.PathInfo) (uploadResult, error) {
 	log.Action("Processing: %s", info.Path)
 
-	streamStart := time.Now()
+	exportStart := time.Now()
 
-	stream, err := nix.ExportAndCompressStream(ctx, info.Path, p.comp, p.jobs)
+	tempFile, fileHash, fileSize, err := nix.ExportAndCompress(ctx, info.Path, p.comp, p.jobs, p.compLevel)
 	if err != nil {
 		return uploadResult{}, fmt.Errorf("export failed: %w", err)
 	}
-	defer stream.Close()
+	exportDuration := time.Since(exportStart)
 
-	digest, fileSize, err := p.client.UploadBlobStream(ctx, stream, "NAR")
-	uploadDuration := time.Since(streamStart)
+	digest, uploadSize, err := p.client.UploadBlobMonolithic(ctx, tempFile, fileHash, "NAR")
+	os.Remove(tempFile)
+
+	uploadDuration := time.Since(exportStart)
+	_ = uploadSize
 
 	if err != nil {
 		return uploadResult{}, fmt.Errorf("upload blob failed: %w", err)
@@ -270,10 +276,11 @@ func (p *Publisher) publishSingle(ctx context.Context, info nix.PathInfo) (uploa
 
 	if p.Profile {
 		log.Info("[profile] Path: %s (%s)", nix.GetPathName(info.Path), oci.FormatSize(fileSize))
-		log.Info("  - Total stream pipe duration: %v", uploadDuration)
+		log.Info("  - Export+compress: %v", exportDuration)
+		log.Info("  - Total (incl upload): %v", uploadDuration)
 	}
 
-	fileHash := strings.TrimPrefix(digest, "sha256:")
+	fileHash = strings.TrimPrefix(digest, "sha256:")
 
 	normalizedNarHash, err := nix.NormalizeNarHash(info.NarHash)
 	if err != nil {
