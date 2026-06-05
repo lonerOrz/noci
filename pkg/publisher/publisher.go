@@ -78,12 +78,28 @@ func (p *Publisher) Publish(ctx context.Context, inputPaths []string) error {
 	}
 
 	var uncachedPaths []string
+	var repairCount int
 	for _, path := range closure {
 		hash := nix.GetPathHash(path)
 		if _, exists := index.Entries[hash]; exists {
 			continue
 		}
+		if exists, _ := p.client.ManifestExists(ctx, hash); exists {
+			if err := p.client.RepairIndexEntry(ctx, hash, index); err != nil {
+				log.Warning("Failed to repair index entry for %s: %v", hash, err)
+			} else {
+				repairCount++
+			}
+			continue
+		}
 		uncachedPaths = append(uncachedPaths, path)
+	}
+
+	if repairCount > 0 {
+		if err := p.client.PushIndex(ctx, index); err != nil {
+			return fmt.Errorf("failed to push repaired index: %w", err)
+		}
+		log.Success("Repaired %d stale index entries.", repairCount)
 	}
 
 	if len(uncachedPaths) == 0 {

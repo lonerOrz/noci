@@ -239,6 +239,36 @@ func (c *Client) FetchManifest(ctx context.Context, tag string) (*OCIManifest, e
 	return &manifest, nil
 }
 
+func (c *Client) RepairIndexEntry(ctx context.Context, hash string, index *CacheIndex) error {
+	manifest, err := c.FetchManifest(ctx, hash)
+	if err != nil {
+		return fmt.Errorf("fetch manifest %s: %w", hash, err)
+	}
+
+	if manifest.Annotations == nil {
+		return fmt.Errorf("manifest %s has no annotations", hash)
+	}
+
+	name := manifest.Annotations["org.nix.name"]
+	narinfo := manifest.Annotations["org.nix.narinfo"]
+	refsStr := manifest.Annotations["org.nix.references"]
+
+	var refs []string
+	if refsStr != "" {
+		refs = strings.Split(refsStr, ",")
+	}
+
+	if len(manifest.Layers) == 0 {
+		return fmt.Errorf("manifest %s has no layers", hash)
+	}
+
+	digest := manifest.Layers[0].Digest
+	size := manifest.Layers[0].Size
+
+	index.AddEntry(hash, name, narinfo, digest, size, refs)
+	return nil
+}
+
 func (c *Client) PushManifest(ctx context.Context, tag string, manifest *OCIManifest) error {
 	data, err := json.Marshal(manifest)
 	if err != nil {
@@ -442,6 +472,7 @@ func (c *Client) FetchIndex(ctx context.Context) (*CacheIndex, error) {
 }
 
 func (c *Client) PushIndex(ctx context.Context, idx *CacheIndex) error {
+	pushStart := time.Now()
 	idx.Generated = time.Now()
 	data, err := json.Marshal(idx)
 	if err != nil {
@@ -469,6 +500,8 @@ func (c *Client) PushIndex(ctx context.Context, idx *CacheIndex) error {
 		return err
 	}
 
+	log.Action("Uploading index...")
+
 	digest, err := c.UploadBlob(ctx, tmp.Name(), hex.EncodeToString(h.Sum(nil)), "index")
 	if err != nil {
 		return err
@@ -493,7 +526,14 @@ func (c *Client) PushIndex(ctx context.Context, idx *CacheIndex) error {
 			"org.nix.index.generated_at": time.Now().UTC().Format(time.RFC3339),
 		},
 	}
-	return c.PushManifest(ctx, "noci-index", &indexManifest)
+	if err := c.PushManifest(ctx, "noci-index", &indexManifest); err != nil {
+		return err
+	}
+
+	if c.Profile {
+		log.Info("[profile] PushIndex: total=%v", time.Since(pushStart))
+	}
+	return nil
 }
 
 func (c *Client) UploadBlob(ctx context.Context, filePath, sha256Hex, description string) (string, error) {
