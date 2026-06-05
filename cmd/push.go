@@ -20,6 +20,7 @@ var (
 	pushCompression  string
 	pushSkipUpstream bool
 	pushJobs         int
+	pushProfile      bool
 )
 
 var pushCmd = &cobra.Command{
@@ -34,6 +35,7 @@ func init() {
 	pushCmd.Flags().StringVarP(&pushCompression, "compression", "c", "zstd", "Compression algorithm (zstd, gzip)")
 	pushCmd.Flags().BoolVar(&pushSkipUpstream, "skip-upstream", true, "Skip pushing packages that carry an upstream cache.nixos.org signature")
 	pushCmd.Flags().IntVarP(&pushJobs, "jobs", "j", 0, "Zstd compression threads (0 = auto: min(4, max(1, NumCPU/2)))")
+	pushCmd.Flags().BoolVar(&pushProfile, "profile", false, "Print detailed performance profiling of the push pipeline")
 }
 
 func runPush(cmd *cobra.Command, args []string) error {
@@ -121,7 +123,9 @@ func runPush(cmd *cobra.Command, args []string) error {
 	}
 
 	client := oci.NewClient(cfg.Registry, cfg.Repo, cfg.Token)
+	client.Profile = pushProfile
 	pub := publisher.NewPublisher(client, signer, pushSkipUpstream, comp, pushJobs)
+	pub.Profile = pushProfile
 
 	return pub.Publish(ctx, inputPaths)
 }

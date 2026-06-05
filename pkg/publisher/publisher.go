@@ -10,6 +10,7 @@ import (
 	"noci/pkg/oci"
 	"strings"
 	"sync"
+	"time"
 )
 
 type Publisher struct {
@@ -18,6 +19,7 @@ type Publisher struct {
 	skipUpstream bool
 	comp         string
 	jobs         int
+	Profile      bool
 }
 
 func NewPublisher(client *oci.Client, signer *nix.Signer, skipUpstream bool, comp string, jobs int) *Publisher {
@@ -235,6 +237,8 @@ func (p *Publisher) Publish(ctx context.Context, inputPaths []string) error {
 func (p *Publisher) publishSingle(ctx context.Context, info nix.PathInfo) (uploadResult, error) {
 	log.Action("Processing: %s", info.Path)
 
+	streamStart := time.Now()
+
 	stream, err := nix.ExportAndCompressStream(ctx, info.Path, p.comp, p.jobs)
 	if err != nil {
 		return uploadResult{}, fmt.Errorf("export failed: %w", err)
@@ -242,8 +246,15 @@ func (p *Publisher) publishSingle(ctx context.Context, info nix.PathInfo) (uploa
 	defer stream.Close()
 
 	digest, fileSize, err := p.client.UploadBlobStream(ctx, stream, "NAR")
+	uploadDuration := time.Since(streamStart)
+
 	if err != nil {
 		return uploadResult{}, fmt.Errorf("upload blob failed: %w", err)
+	}
+
+	if p.Profile {
+		log.Info("[profile] Path: %s (%s)", nix.GetPathName(info.Path), oci.FormatSize(fileSize))
+		log.Info("  - Total stream pipe duration: %v", uploadDuration)
 	}
 
 	fileHash := strings.TrimPrefix(digest, "sha256:")

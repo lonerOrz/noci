@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"noci/pkg/log"
 	"os"
 	"strings"
 	"sync"
@@ -44,6 +45,7 @@ type Client struct {
 	ociTokenPush  string
 	pushFetchTime time.Time
 	client        *http.Client
+	Profile       bool
 }
 
 func NewClient(registry, repo, token string) *Client {
@@ -572,6 +574,8 @@ func (c *Client) UploadBlob(ctx context.Context, filePath, sha256Hex, descriptio
 }
 
 func (c *Client) UploadBlobStream(ctx context.Context, r io.Reader, description string) (digest string, size int64, err error) {
+	streamStart := time.Now()
+
 	token, tErr := c.getOciToken(ctx, "pull,push")
 	if tErr != nil {
 		return "", 0, tErr
@@ -609,6 +613,7 @@ func (c *Client) UploadBlobStream(ctx context.Context, r io.Reader, description 
 	chunkSize := 8 * 1024 * 1024
 	buf := make([]byte, chunkSize)
 	var total int64
+	var accumulatedNetTime time.Duration
 	isTTY := term.IsTerminal(int(os.Stderr.Fd()))
 	lastPrint := time.Time{}
 
@@ -623,7 +628,10 @@ func (c *Client) UploadBlobStream(ctx context.Context, r io.Reader, description 
 			patchReq.Header.Set("Content-Type", "application/octet-stream")
 			patchReq.ContentLength = int64(n)
 
+			startNet := time.Now()
 			patchResp, pErr := c.client.Do(patchReq)
+			accumulatedNetTime += time.Since(startNet)
+
 			if pErr != nil {
 				return "", total, fmt.Errorf("chunk upload failed: %w", pErr)
 			}
@@ -658,10 +666,18 @@ func (c *Client) UploadBlobStream(ctx context.Context, r io.Reader, description 
 
 	computedDigest := "sha256:" + hex.EncodeToString(hasher.Sum(nil))
 
+	startNet := time.Now()
 	headResp, headErr := c.Request(ctx, "HEAD", "/blobs/"+computedDigest, nil, "")
+	accumulatedNetTime += time.Since(startNet)
+
 	if headErr == nil {
 		headResp.Body.Close()
 		if headResp.StatusCode == http.StatusOK {
+			if c.Profile {
+				totalElapsed := time.Since(streamStart)
+				log.Info("[profile] Upload %s already exists, skipped", description)
+				log.Info("  - Total: %v (net: %v, %.1f%%)", totalElapsed, accumulatedNetTime, float64(accumulatedNetTime)/float64(totalElapsed)*100)
+			}
 			return computedDigest, total, nil
 		}
 	} else if headResp != nil {
@@ -682,7 +698,10 @@ func (c *Client) UploadBlobStream(ctx context.Context, r io.Reader, description 
 	putReq.Header.Set("Content-Type", "application/octet-stream")
 	putReq.ContentLength = 0
 
+	startNet = time.Now()
 	putResp, err := c.client.Do(putReq)
+	accumulatedNetTime += time.Since(startNet)
+
 	if err != nil {
 		return "", total, err
 	}
@@ -691,6 +710,13 @@ func (c *Client) UploadBlobStream(ctx context.Context, r io.Reader, description 
 	if putResp.StatusCode != http.StatusCreated && putResp.StatusCode != http.StatusAccepted {
 		bodyBytes, _ := io.ReadAll(putResp.Body)
 		return "", total, fmt.Errorf("failed to finalize upload: HTTP %d, %s", putResp.StatusCode, string(bodyBytes))
+	}
+
+	if c.Profile {
+		totalElapsed := time.Since(streamStart)
+		log.Info("[profile] Upload %s: total=%v net=%v (net %.1f%%)",
+			description, totalElapsed, accumulatedNetTime,
+			float64(accumulatedNetTime)/float64(totalElapsed)*100)
 	}
 
 	return computedDigest, total, nil
