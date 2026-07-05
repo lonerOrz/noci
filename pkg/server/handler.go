@@ -75,6 +75,7 @@ func (s *Server) HandleRoutes(w http.ResponseWriter, r *http.Request) {
 			"/app.js":      true,
 			"/style.css":   true,
 			"/favicon.svg": true,
+			"/healthz":     true,
 		}
 		if silentPaths[r.URL.Path] {
 			return
@@ -105,6 +106,8 @@ func (s *Server) HandleRoutes(w http.ResponseWriter, r *http.Request) {
 		s.handleAPIDigest(lrw, r)
 	case path == "api/index":
 		s.handleAPIIndex(lrw, r)
+	case path == "healthz":
+		s.handleHealthz(lrw, r)
 	case strings.HasPrefix(path, "api/delete/"):
 		s.handleAPIDelete(lrw, r, strings.TrimPrefix(path, "api/delete/"))
 	case strings.HasSuffix(path, ".narinfo"):
@@ -328,6 +331,45 @@ func (s *Server) handleFavicon(w http.ResponseWriter, r *http.Request) {
 	setSource(w, "cache")
 	w.Header().Set("Content-Type", "image/svg+xml")
 	_, _ = w.Write(dist.FaviconSVG)
+}
+
+type HealthResponse struct {
+	Status      string `json:"status"`
+	IndexLoaded bool   `json:"index_loaded"`
+	EntryCount  int    `json:"entry_count"`
+	LastDigest  string `json:"last_digest,omitempty"`
+	CanDelete   bool   `json:"can_delete"`
+	Upstream    string `json:"upstream"`
+}
+
+func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
+	s.indexMu.RLock()
+	loaded := s.index != nil
+	count := 0
+	if loaded {
+		count = len(s.index.Entries)
+	}
+	digest := s.lastDigest
+	s.indexMu.RUnlock()
+
+	resp := HealthResponse{
+		IndexLoaded: loaded,
+		EntryCount:  count,
+		LastDigest:  digest,
+		CanDelete:   s.canDelete,
+		Upstream:    s.upstream,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if loaded {
+		resp.Status = "ok"
+		w.WriteHeader(http.StatusOK)
+	} else {
+		resp.Status = "degraded"
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}
+
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 func (s *Server) handleAPIDigest(w http.ResponseWriter, r *http.Request) {
