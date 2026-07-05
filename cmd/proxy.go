@@ -3,6 +3,7 @@ package cmd
 import (
 	"noci/pkg/log"
 	"noci/pkg/server"
+	"os"
 	"strconv"
 
 	"github.com/spf13/cobra"
@@ -13,6 +14,7 @@ var (
 	proxyPort     int
 	proxyListen   string
 	proxyUpstream string
+	proxyAuthKey  string
 )
 
 var proxyCmd = &cobra.Command{
@@ -26,6 +28,7 @@ func init() {
 	proxyCmd.Flags().IntVar(&proxyPort, "port", 37515, "Port to listen on")
 	proxyCmd.Flags().StringVar(&proxyListen, "listen", "127.0.0.1", "Listen address")
 	proxyCmd.Flags().StringVar(&proxyUpstream, "upstream", "https://cache.nixos.org", "Fallback upstream cache")
+	proxyCmd.Flags().StringVar(&proxyAuthKey, "auth-key", "", "Authentication key for proxy access (env: NOCI_AUTH_KEY)")
 }
 
 func runProxy(cmd *cobra.Command, args []string) error {
@@ -36,8 +39,13 @@ func runProxy(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	authKey := proxyAuthKey
+	if authKey == "" {
+		authKey = os.Getenv("NOCI_AUTH_KEY")
+	}
+
 	addr := proxyListen + ":" + strconv.Itoa(proxyPort)
-	srv := server.NewServer(cfg.Registry, cfg.Repo, cfg.Token, addr, proxyUpstream)
+	srv := server.NewServer(cfg.Registry, cfg.Repo, cfg.Token, addr, proxyUpstream, authKey)
 
 	log.Info("Target OCI repository: %s/%s", cfg.Registry, cfg.Repo)
 	return srv.Start(ctx)

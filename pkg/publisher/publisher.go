@@ -9,6 +9,7 @@ import (
 	"noci/pkg/nix"
 	"noci/pkg/oci"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -214,8 +215,17 @@ func (p *Publisher) Publish(ctx context.Context, inputPaths []string) error {
 
 	log.Info("Found %d new paths. Uploading concurrently...", len(uploadList))
 
+	// Sort by size descending so large files start first
+	sort.Slice(uploadList, func(i, j int) bool {
+		return uploadList[i].NarSize > uploadList[j].NarSize
+	})
+
 	outcomeChan := make(chan uploadResult, len(uploadList))
-	sem := make(chan struct{}, 4)
+	concurrency := p.jobs
+	if concurrency <= 0 {
+		concurrency = 4
+	}
+	sem := make(chan struct{}, concurrency)
 	var wg sync.WaitGroup
 
 	pipelineCtx, cancel := context.WithCancel(ctx)

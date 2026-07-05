@@ -66,7 +66,26 @@ func (s *Server) HandleNixCacheInfo(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte("StoreDir: /nix/store\nWantMassQuery: 1\nPriority: 40\n"))
 }
 
+func (s *Server) checkAuth(r *http.Request) bool {
+	if s.authKey == "" {
+		return true
+	}
+	if key := r.Header.Get("X-Noci-Key"); key != "" {
+		return key == s.authKey
+	}
+	if _, pass, ok := r.BasicAuth(); ok {
+		return pass == s.authKey
+	}
+	return false
+}
+
 func (s *Server) HandleRoutes(w http.ResponseWriter, r *http.Request) {
+	if !s.checkAuth(r) {
+		w.Header().Set("WWW-Authenticate", `Basic realm="noci"`)
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
 	lrw := &loggingResponseWriter{ResponseWriter: w, statusCode: http.StatusNotFound}
 	start := time.Now()
 	defer func() {

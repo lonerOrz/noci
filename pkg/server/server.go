@@ -24,9 +24,10 @@ type Server struct {
 	lastFetch     time.Time
 	lastDigest    string
 	canDelete     bool
+	authKey       string
 }
 
-func NewServer(registry, repo, token, addr, upstream string) *Server {
+func NewServer(registry, repo, token, addr, upstream, authKey string) *Server {
 	if registry == "" || repo == "" || addr == "" {
 		panic("server: registry, repo, and addr must not be empty")
 	}
@@ -48,6 +49,7 @@ func NewServer(registry, repo, token, addr, upstream string) *Server {
 		upstream:      upstream,
 		client:        oci.NewClient(registry, repo, token),
 		upstreamProxy: proxy,
+		authKey:       authKey,
 	}
 }
 

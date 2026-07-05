@@ -142,19 +142,11 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body io.Rea
 
 	url := fmt.Sprintf("https://%s/v2/%s/nix-cache%s", c.registry, c.repo, path)
 
-	var bodyBytes []byte
-	if body != nil {
-		bodyBytes, err = io.ReadAll(body)
-		if err != nil {
-			return nil, err
-		}
-	}
-
 	doer := c.client.Do
 	if !followRedirects {
 		doer = c.getTransport().RoundTrip
 	}
-	return c.doWithRetry(ctx, method, url, token, contentType, bodyBytes, doer)
+	return c.doWithRetry(ctx, method, url, token, contentType, body, doer)
 }
 
 func (c *Client) getTransport() http.RoundTripper {
@@ -164,7 +156,7 @@ func (c *Client) getTransport() http.RoundTripper {
 	return http.DefaultTransport
 }
 
-func (c *Client) doWithRetry(ctx context.Context, method, url, token, contentType string, body []byte, doer func(*http.Request) (*http.Response, error)) (*http.Response, error) {
+func (c *Client) doWithRetry(ctx context.Context, method, url, token, contentType string, body io.Reader, doer func(*http.Request) (*http.Response, error)) (*http.Response, error) {
 	const maxRetries = 3
 	var resp *http.Response
 	var err error
@@ -178,11 +170,7 @@ func (c *Client) doWithRetry(ctx context.Context, method, url, token, contentTyp
 		}
 
 		var req *http.Request
-		var reader io.Reader
-		if body != nil {
-			reader = bytes.NewReader(body)
-		}
-		req, err = http.NewRequestWithContext(ctx, method, url, reader)
+		req, err = http.NewRequestWithContext(ctx, method, url, body)
 		if err != nil {
 			return nil, err
 		}
