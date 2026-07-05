@@ -9,7 +9,11 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var jsonOutput bool
+var (
+	jsonOutput bool
+	verbosity int
+	quietMode  bool
+)
 
 var RootCmd = &cobra.Command{
 	Use:   "noci",
@@ -20,11 +24,21 @@ func ExecuteContext(ctx context.Context) error {
 	if jsonOutput {
 		log.SetMode(log.ModeJSON)
 	}
+	switch {
+	case quietMode:
+		log.SetVerbosity(log.Quiet)
+	case verbosity >= 2:
+		log.SetVerbosity(log.Verbose)
+	case verbosity >= 1:
+		// Normal is default, -v alone doesn't change behavior yet
+	}
 	return RootCmd.ExecuteContext(ctx)
 }
 
 func init() {
 	RootCmd.PersistentFlags().BoolVar(&jsonOutput, "json", false, "Output logs as structured JSON lines")
+	RootCmd.PersistentFlags().CountVarP(&verbosity, "verbose", "v", "Increase verbosity (-v info, -vv debug)")
+	RootCmd.PersistentFlags().BoolVarP(&quietMode, "quiet", "q", false, "Suppress non-essential output")
 	RootCmd.AddCommand(pushCmd)
 	RootCmd.AddCommand(proxyCmd)
 	RootCmd.AddCommand(searchCmd)

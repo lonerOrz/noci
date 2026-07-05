@@ -351,10 +351,8 @@ func (p *Publisher) publishSingle(ctx context.Context, info nix.PathInfo) (uploa
 	defer os.Remove(tempFile)
 	exportDuration := time.Since(exportStart)
 
-	digest, uploadSize, err := p.client.UploadBlobMonolithic(ctx, tempFile, fileHash, "NAR")
-
+	digest, err := p.client.UploadBlobChunked(ctx, tempFile, fileHash, "NAR", 8*1024*1024)
 	uploadDuration := time.Since(exportStart)
-	_ = uploadSize
 
 	if err != nil {
 		return uploadResult{}, fmt.Errorf("upload blob failed: %w", err)

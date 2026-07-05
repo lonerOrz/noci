@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"noci/pkg/log"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -722,6 +723,138 @@ func (c *Client) UploadBlobMonolithic(ctx context.Context, filePath, sha256Hex, 
 	}
 
 	return digest, size, nil
+}
+
+func (c *Client) UploadBlobChunked(ctx context.Context, filePath, sha256Hex, description string, chunkSize int64) (string, error) {
+	digest := "sha256:" + sha256Hex
+
+	headResp, err := c.Request(ctx, "HEAD", "/blobs/"+digest, nil, "")
+	if err == nil && headResp.StatusCode == http.StatusOK {
+		headResp.Body.Close()
+		return digest, nil
+	}
+	if headResp != nil {
+		headResp.Body.Close()
+	}
+
+	initResp, err := c.Request(ctx, "POST", "/blobs/uploads/", nil, "")
+	if err != nil {
+		return "", err
+	}
+	defer initResp.Body.Close()
+
+	if initResp.StatusCode != http.StatusAccepted && initResp.StatusCode != http.StatusCreated {
+		bodyBytes, _ := io.ReadAll(initResp.Body)
+		return "", fmt.Errorf("failed to initiate chunked upload (HTTP %d): %s", initResp.StatusCode, string(bodyBytes))
+	}
+
+	location := initResp.Header.Get("Location")
+	if location == "" {
+		return "", fmt.Errorf("registry didn't return upload location")
+	}
+
+	u, err := url.Parse(location)
+	if err != nil {
+		return "", fmt.Errorf("invalid upload location URL: %w", err)
+	}
+	if !u.IsAbs() {
+		base, _ := url.Parse(fmt.Sprintf("https://%s", c.registry))
+		u = base.ResolveReference(u)
+	}
+
+	file, err := os.Open(filePath)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+
+	stat, err := file.Stat()
+	if err != nil {
+		return "", err
+	}
+	totalSize := stat.Size()
+
+	token, err := c.getOciToken(ctx, "pull,push")
+	if err != nil {
+		return "", err
+	}
+
+	var offset int64
+	buf := make([]byte, chunkSize)
+	for offset < totalSize {
+		n, readErr := file.Read(buf)
+		if n > 0 {
+			patchURL := u.String()
+			if offset+int64(n) < totalSize {
+				// Intermediate PATCH — server returns new Location with state
+				patchURL += "?state=" + strconv.FormatInt(offset, 10)
+			}
+
+			req, err := http.NewRequestWithContext(ctx, "PATCH", patchURL, bytes.NewReader(buf[:n]))
+			if err != nil {
+				return "", err
+			}
+			req.Header.Set("Authorization", "Bearer "+token)
+			req.Header.Set("Content-Type", "application/octet-stream")
+			req.Header.Set("Content-Length", strconv.Itoa(n))
+			req.ContentLength = int64(n)
+
+			resp, err := c.client.Do(req)
+			if err != nil {
+				return "", fmt.Errorf("chunked upload PATCH failed at offset %d: %w", offset, err)
+			}
+			resp.Body.Close()
+
+			if resp.StatusCode != http.StatusAccepted && resp.StatusCode != http.StatusCreated {
+				bodyBytes, _ := io.ReadAll(resp.Body)
+				return "", fmt.Errorf("chunked upload PATCH failed at offset %d: HTTP %d, %s", offset, resp.StatusCode, string(bodyBytes))
+			}
+
+			newLoc := resp.Header.Get("Location")
+			if newLoc != "" {
+				newU, err := url.Parse(newLoc)
+				if err == nil {
+					if !newU.IsAbs() {
+						base, _ := url.Parse(fmt.Sprintf("https://%s", c.registry))
+						newU = base.ResolveReference(newU)
+					}
+					u = newU
+				}
+			}
+
+			offset += int64(n)
+		}
+		if readErr != nil {
+			break
+		}
+	}
+
+	// Final PUT to complete
+	finalURL := u.String()
+	if strings.Contains(finalURL, "?") {
+		finalURL += "&digest=" + digest
+	} else {
+		finalURL += "?digest=" + digest
+	}
+
+	putReq, err := http.NewRequestWithContext(ctx, "PUT", finalURL, nil)
+	if err != nil {
+		return "", err
+	}
+	putReq.Header.Set("Authorization", "Bearer "+token)
+
+	putResp, err := c.client.Do(putReq)
+	if err != nil {
+		return "", fmt.Errorf("chunked upload final PUT failed: %w", err)
+	}
+	defer putResp.Body.Close()
+
+	if putResp.StatusCode != http.StatusCreated && putResp.StatusCode != http.StatusAccepted {
+		bodyBytes, _ := io.ReadAll(putResp.Body)
+		return "", fmt.Errorf("chunked upload final PUT failed: HTTP %d, %s", putResp.StatusCode, string(bodyBytes))
+	}
+
+	return digest, nil
 }
 
 func (c *Client) downloadBlob(ctx context.Context, digest string) ([]byte, error) {
