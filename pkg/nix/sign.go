@@ -63,20 +63,6 @@ func (s *Signer) SignPath(storePath, narHash string, narSize int64, refs []strin
 
 const NixAlphabet = "0123456789abcdfghijklmnpqrsvwxyz"
 
-func IsValidNixHash(s string) bool {
-	if len(s) != 32 {
-		return false
-	}
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if !((c >= '0' && c <= '9') ||
-			(c >= 'a' && c <= 'z' && c != 'e' && c != 'o' && c != 't' && c != 'u')) {
-			return false
-		}
-	}
-	return true
-}
-
 // NormalizeNarHash 将任意 "sha256-xxxx..."（SRI）格式无损转换为标准 "sha256:xxxx..."（Nix Base32）
 func NormalizeNarHash(hash string) (string, error) {
 	if strings.HasPrefix(hash, "sha256:") {

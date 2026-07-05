@@ -3,7 +3,6 @@ const fs = require("fs");
 const path = require("path");
 const os = require("os");
 const http = require("http");
-const https = require("https");
 const utils = require("./utils");
 
 async function run() {
@@ -138,28 +137,14 @@ async function prepareBinary() {
   return target;
 }
 
-function downloadFile(url, targetPath, redirects = 0) {
-  if (redirects > 5) {
-    return Promise.reject(new Error("Too many redirects"));
-  }
-  return new Promise((resolve, reject) => {
-    https
-      .get(url, (res) => {
-        if (res.statusCode === 301 || res.statusCode === 302)
-          return downloadFile(res.headers.location, targetPath, redirects + 1)
-            .then(resolve)
-            .catch(reject);
-        if (res.statusCode !== 200)
-          return reject(new Error(`HTTP ${res.statusCode}`));
-        const file = fs.createWriteStream(targetPath);
-        res.pipe(file);
-        file.on("finish", () => {
-          fs.chmodSync(targetPath, "755");
-          resolve();
-        });
-      })
-      .on("error", reject);
-  });
+async function downloadFile(url, targetPath) {
+  const res = await fetch(url, { redirect: "follow" });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const file = fs.createWriteStream(targetPath);
+  for await (const chunk of res.body) file.write(chunk);
+  file.end();
+  await new Promise((r) => file.on("finish", r));
+  fs.chmodSync(targetPath, "755");
 }
 
 function waitForProxyPort(proc, logPath) {

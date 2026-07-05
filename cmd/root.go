@@ -10,10 +10,6 @@ var RootCmd = &cobra.Command{
 	Short: "noci is a highly modular Nix binary cache over OCI registry",
 }
 
-func Execute() error {
-	return RootCmd.Execute()
-}
-
 func ExecuteContext(ctx context.Context) error {
 	return RootCmd.ExecuteContext(ctx)
 }

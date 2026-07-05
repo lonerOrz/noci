@@ -123,6 +123,14 @@ func (c *Client) getOciToken(ctx context.Context, actions string) (string, error
 }
 
 func (c *Client) Request(ctx context.Context, method, path string, body io.Reader, contentType string) (*http.Response, error) {
+	return c.doRequest(ctx, method, path, body, contentType, true)
+}
+
+func (c *Client) RawRequest(ctx context.Context, method, path string, body io.Reader, contentType string) (*http.Response, error) {
+	return c.doRequest(ctx, method, path, body, contentType, false)
+}
+
+func (c *Client) doRequest(ctx context.Context, method, path string, body io.Reader, contentType string, followRedirects bool) (*http.Response, error) {
 	actions := "pull"
 	if method != "GET" && method != "HEAD" {
 		actions = "pull,push"
@@ -142,7 +150,11 @@ func (c *Client) Request(ctx context.Context, method, path string, body io.Reade
 		}
 	}
 
-	return c.doWithRetry(ctx, method, url, token, contentType, bodyBytes, c.client.Do)
+	doer := c.client.Do
+	if !followRedirects {
+		doer = c.getTransport().RoundTrip
+	}
+	return c.doWithRetry(ctx, method, url, token, contentType, bodyBytes, doer)
 }
 
 func (c *Client) getTransport() http.RoundTripper {
@@ -150,29 +162,6 @@ func (c *Client) getTransport() http.RoundTripper {
 		return c.client.Transport
 	}
 	return http.DefaultTransport
-}
-
-func (c *Client) RawRequest(ctx context.Context, method, path string, body io.Reader, contentType string) (*http.Response, error) {
-	actions := "pull"
-	if method != "GET" && method != "HEAD" {
-		actions = "pull,push"
-	}
-	token, err := c.getOciToken(ctx, actions)
-	if err != nil {
-		return nil, err
-	}
-
-	url := fmt.Sprintf("https://%s/v2/%s/nix-cache%s", c.registry, c.repo, path)
-
-	var bodyBytes []byte
-	if body != nil {
-		bodyBytes, err = io.ReadAll(body)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	return c.doWithRetry(ctx, method, url, token, contentType, bodyBytes, c.getTransport().RoundTrip)
 }
 
 func (c *Client) doWithRetry(ctx context.Context, method, url, token, contentType string, body []byte, doer func(*http.Request) (*http.Response, error)) (*http.Response, error) {

@@ -94,34 +94,6 @@ func GetPathInfos(ctx context.Context, storePaths []string) (map[string]PathInfo
 	return nil, fmt.Errorf("failed to parse nix path-info output: %s", out.String())
 }
 
-// GetPathInfo 使用 nix path-info 读取某个路径的元数据 (Context-Aware)
-func GetPathInfo(ctx context.Context, storePath string) (*PathInfo, error) {
-	cmd := exec.CommandContext(ctx, "nix", "path-info", "--json", storePath)
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	if err := cmd.Run(); err != nil {
-		return nil, err
-	}
-
-	var list []PathInfo
-	if err := json.Unmarshal(out.Bytes(), &list); err == nil && len(list) > 0 {
-		if list[0].Path == "" {
-			list[0].Path = storePath
-		}
-		return &list[0], nil
-	}
-
-	var dict map[string]PathInfo
-	if err := json.Unmarshal(out.Bytes(), &dict); err == nil {
-		for path, info := range dict {
-			info.Path = path
-			return &info, nil
-		}
-	}
-
-	return nil, fmt.Errorf("failed to parse nix path-info output: %s", out.String())
-}
-
 // BuildTarget 执行本地 `nix build`
 func BuildTarget(ctx context.Context, target string) ([]string, error) {
 	cmd := exec.CommandContext(ctx, "nix", "build", "--extra-experimental-features", "nix-command flakes", target, "-L", "--no-link", "--json")

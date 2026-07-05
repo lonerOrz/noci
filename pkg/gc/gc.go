@@ -1,12 +1,14 @@
 package gc
 
 import (
-	"noci/pkg/nix"
 	"noci/pkg/oci"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"time"
 )
+
+var nixHashRe = regexp.MustCompile(`^[0-9abcdfghijklmnpqrsvwxyz]{32}$`)
 
 type Engine struct {
 	index       *oci.CacheIndex
@@ -233,7 +235,7 @@ func getHashFromPath(storePath string) string {
 		return ""
 	}
 	hash := base[:32]
-	if !nix.IsValidNixHash(hash) {
+	if !nixHashRe.MatchString(hash) {
 		return ""
 	}
 	return hash
