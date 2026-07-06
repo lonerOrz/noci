@@ -787,7 +787,10 @@ func (c *Client) UploadBlobChunked(ctx context.Context, filePath, sha256Hex, des
 			patchURL := u.String()
 			if offset+int64(n) < totalSize {
 				// Intermediate PATCH — server returns new Location with state
-				patchURL += "?state=" + strconv.FormatInt(offset, 10)
+				q := u.Query()
+				q.Set("state", strconv.FormatInt(offset, 10))
+				u.RawQuery = q.Encode()
+				patchURL = u.String()
 			}
 
 			req, err := http.NewRequestWithContext(ctx, "PATCH", patchURL, bytes.NewReader(buf[:n]))
@@ -803,12 +806,13 @@ func (c *Client) UploadBlobChunked(ctx context.Context, filePath, sha256Hex, des
 			if err != nil {
 				return "", fmt.Errorf("chunked upload PATCH failed at offset %d: %w", offset, err)
 			}
-			resp.Body.Close()
 
 			if resp.StatusCode != http.StatusAccepted && resp.StatusCode != http.StatusCreated {
 				bodyBytes, _ := io.ReadAll(resp.Body)
+				resp.Body.Close()
 				return "", fmt.Errorf("chunked upload PATCH failed at offset %d: HTTP %d, %s", offset, resp.StatusCode, string(bodyBytes))
 			}
+			resp.Body.Close()
 
 			newLoc := resp.Header.Get("Location")
 			if newLoc != "" {
@@ -842,6 +846,7 @@ func (c *Client) UploadBlobChunked(ctx context.Context, filePath, sha256Hex, des
 		return "", err
 	}
 	putReq.Header.Set("Authorization", "Bearer "+token)
+	putReq.Header.Set("Content-Type", "application/octet-stream")
 
 	putResp, err := c.client.Do(putReq)
 	if err != nil {
