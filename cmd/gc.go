@@ -17,6 +17,7 @@ var (
 	gcMaxSize       string
 	gcGracePeriod   string
 	gcPhysicalSweep bool
+	gcKeepVersions  int
 )
 
 var gcCmd = &cobra.Command{
@@ -31,6 +32,7 @@ func init() {
 	gcCmd.Flags().StringVar(&gcMaxSize, "max-size", "", "Storage budget cap (e.g., '10GB', '500MB')")
 	gcCmd.Flags().StringVar(&gcGracePeriod, "grace-period", "6h", "Safety grace period for newly uploaded files")
 	gcCmd.Flags().BoolVar(&gcPhysicalSweep, "physical-sweep", false, "Physically prune evicted OCI manifests (supports tag-overwriting on GHCR)")
+	gcCmd.Flags().IntVar(&gcKeepVersions, "keep-versions", 3, "Keep at most N recent versions per package name (0 = disabled)")
 
 	RootCmd.AddCommand(gcCmd)
 }
@@ -60,6 +62,7 @@ func runGC(cmd *cobra.Command, args []string) error {
 	}
 
 	engine := gc.NewEngine(index, dur)
+	engine.SetKeepVersions(gcKeepVersions)
 	var result *gc.Result
 
 	if len(args) > 0 {

@@ -197,6 +197,71 @@ func TestCascadeEvict(t *testing.T) {
 	}
 }
 
+func TestBasePackageName(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"hello-2.12.1", "hello"},
+		{"openssl-3.0.0", "openssl"},
+		{"python3-3.11.0", "python3"},
+		{"perl5.36.0-Foo-Bar-1.23", "perl5.36.0-Foo-Bar"},
+		{"libfoo", "libfoo"},
+		{"nix-2.18.1", "nix"},
+		{"zlib-1.2.13", "zlib"},
+	}
+	for _, tt := range tests {
+		got := basePackageName(tt.input)
+		if got != tt.want {
+			t.Errorf("basePackageName(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestSweepKeepVersions(t *testing.T) {
+	now := time.Now()
+	idx := &oci.CacheIndex{
+		Version: 2,
+		Entries: map[string]oci.IndexItem{
+			"aaa11111111111111111111111111111": {
+				Name:       "foo-1.0.0",
+				NarSize:    100,
+				UploadedAt: now.Add(-3 * time.Hour),
+				LastUsed:   now.Add(-3 * time.Hour),
+			},
+			"bbb22222222222222222222222222222": {
+				Name:       "foo-2.0.0",
+				NarSize:    200,
+				UploadedAt: now.Add(-2 * time.Hour),
+				LastUsed:   now.Add(-2 * time.Hour),
+			},
+			"ccc33333333333333333333333333333": {
+				Name:       "foo-3.0.0",
+				NarSize:    300,
+				UploadedAt: now.Add(-1 * time.Hour),
+				LastUsed:   now.Add(-1 * time.Hour),
+			},
+			"ddd44444444444444444444444444444": {
+				Name:       "bar-1.0.0",
+				NarSize:    400,
+				UploadedAt: now.Add(-4 * time.Hour),
+				LastUsed:   now.Add(-4 * time.Hour),
+			},
+		},
+		Roots: map[string]oci.GCRoot{},
+	}
+
+	eng := NewEngine(idx, 0) // no grace period
+	eng.SetKeepVersions(2)
+	result := eng.Sweep(now, 0) // maxSize=0 → evict all unmarked
+
+	// 3 versions of "foo": keep 2 newest (ccc, bbb), evict 1 (aaa)
+	// 1 version of "bar": no version protection, evicted
+	if result.EvictedCount != 2 {
+		t.Errorf("EvictedCount = %d, want 2 (foo-1.0.0 + bar-1.0.0)", result.EvictedCount)
+	}
+}
+
 func TestApply(t *testing.T) {
 	now := time.Now()
 	idx := &oci.CacheIndex{
