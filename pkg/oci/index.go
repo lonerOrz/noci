@@ -15,6 +15,7 @@ type CacheIndex struct {
 	GCRootsV1 []string             `json:"gc_roots,omitempty"` // 向前兼容 v1 废弃字段
 	Roots     map[string]GCRoot    `json:"roots,omitempty"`    // v2 弹性的根结构
 	Entries   map[string]IndexItem `json:"entries"`
+	Source    string               `json:"source,omitempty"` // 该 index 所属 registry
 }
 
 type GCRoot struct {
@@ -31,6 +32,7 @@ type IndexItem struct {
 	LastUsed   time.Time `json:"last_used"`   // 活跃时间戳（LRU 支撑）
 	UploadedAt time.Time `json:"uploaded_at"` // 物理上传时间（安全宽限期支撑）
 	References []string  `json:"references"`  // 预析出的哈希依赖图，实现零网络开销图搜索
+	Source     string    `json:"source,omitempty"` // 条目来源 registry
 }
 
 func NewIndex(registry, repo string) *CacheIndex {

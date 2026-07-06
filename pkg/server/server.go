@@ -13,20 +13,39 @@ import (
 	"time"
 )
 
-type Server struct {
-	addr          string
-	upstream      string
-	client        *oci.Client
-	upstreamProxy *httputil.ReverseProxy
-	indexMu       sync.RWMutex
-	index         *oci.CacheIndex
-	negCache      sync.Map
-	lastFetch     time.Time
-	lastDigest    string
-	canDelete     bool
+// metrics tracks per-route request counts for /metrics endpoint.
+type metrics struct {
+	mu        sync.Mutex
+	counts    map[string]int // key: "METHOD /path STATUS SOURCE"
+	startTime time.Time
 }
 
-func NewServer(registry, repo, token, addr, upstream string) *Server {
+func (m *metrics) inc(method, path, status, source string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	key := method + " " + path + " " + status + " " + source
+	m.counts[key]++
+}
+
+type Server struct {
+	addr           string
+	upstream       string
+	client         *oci.Client
+	upstreamProxy  *httputil.ReverseProxy
+	upstreamExtras []*httputil.ReverseProxy
+	indexMu        sync.RWMutex
+	index          *oci.CacheIndex
+	negCache       sync.Map
+	lastFetch      time.Time
+	lastDigest     string
+	canDelete      bool
+	authKey        string
+	metrics        metrics
+	limiter        *rateLimiter
+	cb             *CircuitBreaker
+}
+
+func NewServer(registry, repo, token, addr, upstream, authKey string, rateLimit float64, extraUpstreams []string) *Server {
 	if registry == "" || repo == "" || addr == "" {
 		panic("server: registry, repo, and addr must not be empty")
 	}
@@ -43,11 +62,41 @@ func NewServer(registry, repo, token, addr, upstream string) *Server {
 		log.Warning("Upstream proxy init failed: %v", err)
 	}
 
+	var extras []*httputil.ReverseProxy
+	for _, eu := range extraUpstreams {
+		euURL, err := url.Parse(eu)
+		if err != nil {
+			log.Warning("Extra upstream %q parse failed: %v", eu, err)
+			continue
+		}
+		ep := httputil.NewSingleHostReverseProxy(euURL)
+		origDir := ep.Director
+		ep.Director = func(req *http.Request) {
+			origDir(req)
+			req.Host = euURL.Host
+		}
+		extras = append(extras, ep)
+	}
+
+	var limiter *rateLimiter
+	if rateLimit > 0 {
+		burst := int(rateLimit * 2)
+		if burst < 1 {
+			burst = 1
+		}
+		limiter = newRateLimiter(rateLimit, burst)
+	}
+
 	return &Server{
-		addr:          addr,
-		upstream:      upstream,
-		client:        oci.NewClient(registry, repo, token),
-		upstreamProxy: proxy,
+		addr:           addr,
+		upstream:       upstream,
+		client:         oci.NewClient(registry, repo, token),
+		upstreamProxy:  proxy,
+		upstreamExtras: extras,
+		authKey:        authKey,
+		metrics:        metrics{counts: make(map[string]int), startTime: time.Now()},
+		limiter:        limiter,
+		cb:             NewCircuitBreaker(5, 30*time.Second),
 	}
 }
 
@@ -65,6 +114,7 @@ func (s *Server) Start(ctx context.Context) error {
 
 	s.StartPreflightProbe()
 	go s.startActiveSyncLoop(ctx, 5*time.Second)
+	go s.startCleanupLoop(ctx)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.HandleRoutes)
@@ -147,6 +197,21 @@ func (s *Server) startActiveSyncLoop(ctx context.Context, interval time.Duration
 					log.Success("OCI index auto-synced successfully. Entries: %d", s.indexCount())
 				}
 				cancel()
+			}
+		}
+	}
+}
+
+func (s *Server) startCleanupLoop(ctx context.Context) {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if s.limiter != nil {
+				s.limiter.cleanup()
 			}
 		}
 	}

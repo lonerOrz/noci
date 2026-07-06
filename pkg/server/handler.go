@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"noci/dist"
 	"noci/pkg/log"
@@ -15,6 +16,62 @@ import (
 	"sync"
 	"time"
 )
+
+type tokenBucket struct {
+	tokens   float64
+	lastTime time.Time
+}
+
+type rateLimiter struct {
+	mu      sync.Mutex
+	buckets map[string]*tokenBucket
+	rate    float64
+	burst   int
+}
+
+func newRateLimiter(rate float64, burst int) *rateLimiter {
+	return &rateLimiter{
+		buckets: make(map[string]*tokenBucket),
+		rate:    rate,
+		burst:   burst,
+	}
+}
+
+func (rl *rateLimiter) cleanup() {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	now := time.Now()
+	for ip, b := range rl.buckets {
+		if now.Sub(b.lastTime) > 5*time.Minute {
+			delete(rl.buckets, ip)
+		}
+	}
+}
+
+func (rl *rateLimiter) allow(ip string) bool {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	now := time.Now()
+	b, ok := rl.buckets[ip]
+	if !ok {
+		b = &tokenBucket{tokens: float64(rl.burst), lastTime: now}
+		rl.buckets[ip] = b
+	}
+
+	elapsed := now.Sub(b.lastTime).Seconds()
+	b.tokens += elapsed * rl.rate
+	if b.tokens > float64(rl.burst) {
+		b.tokens = float64(rl.burst)
+	}
+	b.lastTime = now
+
+	if b.tokens < 1 {
+		return false
+	}
+	b.tokens--
+	return true
+}
 
 type loggingResponseWriter struct {
 	http.ResponseWriter
@@ -66,7 +123,34 @@ func (s *Server) HandleNixCacheInfo(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte("StoreDir: /nix/store\nWantMassQuery: 1\nPriority: 40\n"))
 }
 
+func (s *Server) checkAuth(r *http.Request) bool {
+	if s.authKey == "" {
+		return true
+	}
+	if key := r.Header.Get("X-Noci-Key"); key != "" {
+		return key == s.authKey
+	}
+	if _, pass, ok := r.BasicAuth(); ok {
+		return pass == s.authKey
+	}
+	return false
+}
+
 func (s *Server) HandleRoutes(w http.ResponseWriter, r *http.Request) {
+	if !s.checkAuth(r) {
+		w.Header().Set("WWW-Authenticate", `Basic realm="noci"`)
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	if s.limiter != nil {
+		ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+		if !s.limiter.allow(ip) {
+			http.Error(w, "Rate Limit Exceeded", http.StatusTooManyRequests)
+			return
+		}
+	}
+
 	lrw := &loggingResponseWriter{ResponseWriter: w, statusCode: http.StatusNotFound}
 	start := time.Now()
 	defer func() {
@@ -75,7 +159,12 @@ func (s *Server) HandleRoutes(w http.ResponseWriter, r *http.Request) {
 			"/app.js":      true,
 			"/style.css":   true,
 			"/favicon.svg": true,
+			"/healthz":     true,
+			"/metrics":     true,
 		}
+		// Track metrics for all requests
+		status := strconv.Itoa(lrw.statusCode)
+		s.metrics.inc(r.Method, r.URL.Path, status, lrw.source)
 		if silentPaths[r.URL.Path] {
 			return
 		}
@@ -105,6 +194,10 @@ func (s *Server) HandleRoutes(w http.ResponseWriter, r *http.Request) {
 		s.handleAPIDigest(lrw, r)
 	case path == "api/index":
 		s.handleAPIIndex(lrw, r)
+	case path == "healthz":
+		s.handleHealthz(lrw, r)
+	case path == "metrics":
+		s.handleMetrics(lrw, r)
 	case strings.HasPrefix(path, "api/delete/"):
 		s.handleAPIDelete(lrw, r, strings.TrimPrefix(path, "api/delete/"))
 	case strings.HasSuffix(path, ".narinfo"):
@@ -259,6 +352,11 @@ func (s *Server) streamBlob(w http.ResponseWriter, r *http.Request, digest strin
 }
 
 func (s *Server) proxyToUpstream(w http.ResponseWriter, r *http.Request, path string) {
+	if !s.cb.Allow() {
+		http.Error(w, "Upstream temporarily unavailable (circuit breaker open)", http.StatusServiceUnavailable)
+		return
+	}
+
 	if s.upstreamProxy != nil {
 		r.URL.Path = "/" + path
 		s.upstreamProxy.ServeHTTP(w, r)
@@ -273,11 +371,23 @@ func (s *Server) proxyToUpstream(w http.ResponseWriter, r *http.Request, path st
 	}
 
 	resp, err := http.DefaultClient.Do(req)
-	if err != nil || resp.StatusCode != http.StatusOK {
+	if err != nil {
+		s.cb.RecordFailure()
 		http.NotFound(w, r)
 		return
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode >= 500 {
+		s.cb.RecordFailure()
+	} else {
+		s.cb.RecordSuccess()
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		http.NotFound(w, r)
+		return
+	}
 
 	for k, vv := range resp.Header {
 		if isHopByHopHeader(k) {
@@ -328,6 +438,103 @@ func (s *Server) handleFavicon(w http.ResponseWriter, r *http.Request) {
 	setSource(w, "cache")
 	w.Header().Set("Content-Type", "image/svg+xml")
 	_, _ = w.Write(dist.FaviconSVG)
+}
+
+type HealthResponse struct {
+	Status      string `json:"status"`
+	IndexLoaded bool   `json:"index_loaded"`
+	EntryCount  int    `json:"entry_count"`
+	LastDigest  string `json:"last_digest,omitempty"`
+	CanDelete   bool   `json:"can_delete"`
+	Upstream    string `json:"upstream"`
+}
+
+func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
+	s.indexMu.RLock()
+	loaded := s.index != nil
+	count := 0
+	if loaded {
+		count = len(s.index.Entries)
+	}
+	digest := s.lastDigest
+	s.indexMu.RUnlock()
+
+	resp := HealthResponse{
+		IndexLoaded: loaded,
+		EntryCount:  count,
+		LastDigest:  digest,
+		CanDelete:   s.canDelete,
+		Upstream:    s.upstream,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if loaded {
+		resp.Status = "ok"
+		w.WriteHeader(http.StatusOK)
+	} else {
+		resp.Status = "degraded"
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}
+
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	s.metrics.mu.Lock()
+	counts := make(map[string]int, len(s.metrics.counts))
+	for k, v := range s.metrics.counts {
+		counts[k] = v
+	}
+	uptime := time.Since(s.metrics.startTime).Seconds()
+	s.metrics.mu.Unlock()
+
+	s.indexMu.RLock()
+	indexEntryCount := 0
+	var indexSize int64
+	if s.index != nil {
+		indexEntryCount = len(s.index.Entries)
+		for _, entry := range s.index.Entries {
+			indexSize += entry.NarSize
+		}
+	}
+	s.indexMu.RUnlock()
+
+	negCacheCount := 0
+	s.negCache.Range(func(_, _ interface{}) bool {
+		negCacheCount++
+		return true
+	})
+
+	cbState := 0
+	if s.cb != nil {
+		cbState = int(s.cb.State())
+	}
+
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+	fmt.Fprintf(w, "# HELP noci_http_requests_total Total HTTP requests\n")
+	fmt.Fprintf(w, "# TYPE noci_http_requests_total counter\n")
+	for key, val := range counts {
+		parts := strings.SplitN(key, " ", 4)
+		if len(parts) == 4 {
+			fmt.Fprintf(w, "noci_http_requests_total{method=%q,path=%q,status=%q,source=%q} %d\n",
+				parts[0], parts[1], parts[2], parts[3], val)
+		}
+	}
+	fmt.Fprintf(w, "\n# HELP noci_index_entries Number of index entries\n")
+	fmt.Fprintf(w, "# TYPE noci_index_entries gauge\n")
+	fmt.Fprintf(w, "noci_index_entries %d\n", indexEntryCount)
+	fmt.Fprintf(w, "\n# HELP noci_index_size_bytes Total size of cached packages in bytes\n")
+	fmt.Fprintf(w, "# TYPE noci_index_size_bytes gauge\n")
+	fmt.Fprintf(w, "noci_index_size_bytes %d\n", indexSize)
+	fmt.Fprintf(w, "\n# HELP noci_neg_cache_size Number of entries in negative cache\n")
+	fmt.Fprintf(w, "# TYPE noci_neg_cache_size gauge\n")
+	fmt.Fprintf(w, "noci_neg_cache_size %d\n", negCacheCount)
+	fmt.Fprintf(w, "\n# HELP noci_upstream_circuit_breaker_state Circuit breaker state (0=closed, 1=half-open, 2=open)\n")
+	fmt.Fprintf(w, "# TYPE noci_upstream_circuit_breaker_state gauge\n")
+	fmt.Fprintf(w, "noci_upstream_circuit_breaker_state %d\n", cbState)
+	fmt.Fprintf(w, "\n# HELP noci_uptime_seconds Time since proxy started\n")
+	fmt.Fprintf(w, "# TYPE noci_uptime_seconds gauge\n")
+	fmt.Fprintf(w, "noci_uptime_seconds %.1f\n", uptime)
 }
 
 func (s *Server) handleAPIDigest(w http.ResponseWriter, r *http.Request) {

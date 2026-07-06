@@ -8,18 +8,103 @@ import (
 	"noci/pkg/log"
 	"noci/pkg/nix"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
+	"gopkg.in/yaml.v3"
 )
 
 type OCIConfig struct {
 	Registry string
 	Repo     string
 	Token    string
+}
+
+// RegistryEntry is a single registry target for multi-registry support.
+type RegistryEntry struct {
+	Registry string
+	Repo     string
+	Token    string
+}
+
+// RegistryTarget is a single registry entry in YAML config.
+type RegistryTarget struct {
+	Name     string `yaml:"name"`
+	Registry string `yaml:"registry"`
+	Repo     string `yaml:"repo"`
+	Token    string `yaml:"token"`
+	Mode     string `yaml:"mode"` // "push-pull" (default), "push-only", "pull-only"
+}
+
+// NociConfig represents the optional YAML configuration file.
+type NociConfig struct {
+	Registry   string           `yaml:"registry"`
+	Repo       string           `yaml:"repo"`
+	Token      string           `yaml:"token"`
+	Registries []RegistryTarget `yaml:"registries"`
+}
+
+func configFilePaths() []string {
+	home, _ := os.UserHomeDir()
+	return []string{
+		filepath.Join(home, ".config", "noci", "config.yaml"),
+		filepath.Join(home, ".config", "noci", "config.yml"),
+		"noci.yaml",
+		"noci.yml",
+	}
+}
+
+func loadNociConfig() (*NociConfig, error) {
+	for _, path := range configFilePaths() {
+		data, err := os.ReadFile(path)
+		if err == nil {
+			var cfg NociConfig
+			if err := yaml.Unmarshal(data, &cfg); err != nil {
+				return nil, fmt.Errorf("failed to parse %s: %w", path, err)
+			}
+			return &cfg, nil
+		}
+	}
+	return nil, fmt.Errorf("no config file found")
+}
+
+// ResolveRegistries merges --registries flags with YAML config and falls back to single registry.
+func ResolveRegistries(values []string, base OCIConfig) ([]RegistryEntry, error) {
+	if len(values) > 0 {
+		return ParseRegistries(values, base)
+	}
+
+	cfg, err := loadNociConfig()
+	if err != nil && len(values) == 0 {
+		return []RegistryEntry{{Registry: base.Registry, Repo: base.Repo, Token: base.Token}}, nil
+	}
+
+	if err == nil && len(cfg.Registries) > 0 {
+		var entries []RegistryEntry
+		for _, rt := range cfg.Registries {
+			if rt.Mode == "pull-only" {
+				continue
+			}
+			token := rt.Token
+			if token == "" {
+				token = os.Getenv("NOCI_TOKEN")
+			}
+			entries = append(entries, RegistryEntry{
+				Registry: rt.Registry,
+				Repo:     rt.Repo,
+				Token:    token,
+			})
+		}
+		if len(entries) > 0 {
+			return entries, nil
+		}
+	}
+
+	return []RegistryEntry{{Registry: base.Registry, Repo: base.Repo, Token: base.Token}}, nil
 }
 
 var sizeRegex = regexp.MustCompile(`^(\d+)\s*(B|KB|MB|GB|TB|K|M|G|T)?$`)
@@ -72,6 +157,27 @@ func (cf *CommonFlags) Resolve() (OCIConfig, error) {
 		Repo:     repo,
 		Token:    token,
 	}, nil
+}
+
+// ParseRegistries parses --registries flag values ("registry/repo") into RegistryEntry list.
+// Falls back to single OCIConfig if no extra registries are specified.
+func ParseRegistries(values []string, base OCIConfig) ([]RegistryEntry, error) {
+	if len(values) == 0 {
+		return []RegistryEntry{{Registry: base.Registry, Repo: base.Repo, Token: base.Token}}, nil
+	}
+	var entries []RegistryEntry
+	for _, v := range values {
+		parts := strings.SplitN(v, "/", 2)
+		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+			return nil, fmt.Errorf("invalid registry format %q (expected registry/repo)", v)
+		}
+		token := os.Getenv("NOCI_TOKEN")
+		if token == "" {
+			token = os.Getenv("GITHUB_TOKEN")
+		}
+		entries = append(entries, RegistryEntry{Registry: parts[0], Repo: parts[1], Token: token})
+	}
+	return entries, nil
 }
 
 func readDockerConfigToken(registry string) string {

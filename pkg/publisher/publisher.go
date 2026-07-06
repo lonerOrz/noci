@@ -9,6 +9,7 @@ import (
 	"noci/pkg/nix"
 	"noci/pkg/oci"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -214,8 +215,17 @@ func (p *Publisher) Publish(ctx context.Context, inputPaths []string) error {
 
 	log.Info("Found %d new paths. Uploading concurrently...", len(uploadList))
 
+	// Sort by size descending so large files start first
+	sort.Slice(uploadList, func(i, j int) bool {
+		return uploadList[i].NarSize > uploadList[j].NarSize
+	})
+
 	outcomeChan := make(chan uploadResult, len(uploadList))
-	sem := make(chan struct{}, 4)
+	concurrency := p.jobs
+	if concurrency <= 0 {
+		concurrency = 4
+	}
+	sem := make(chan struct{}, concurrency)
 	var wg sync.WaitGroup
 
 	pipelineCtx, cancel := context.WithCancel(ctx)
@@ -341,10 +351,8 @@ func (p *Publisher) publishSingle(ctx context.Context, info nix.PathInfo) (uploa
 	defer os.Remove(tempFile)
 	exportDuration := time.Since(exportStart)
 
-	digest, uploadSize, err := p.client.UploadBlobMonolithic(ctx, tempFile, fileHash, "NAR")
-
+	digest, err := p.client.UploadBlobChunked(ctx, tempFile, fileHash, "NAR", 8*1024*1024)
 	uploadDuration := time.Since(exportStart)
-	_ = uploadSize
 
 	if err != nil {
 		return uploadResult{}, fmt.Errorf("upload blob failed: %w", err)

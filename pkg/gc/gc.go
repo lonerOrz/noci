@@ -1,16 +1,24 @@
 package gc
 
 import (
-	"noci/pkg/nix"
 	"noci/pkg/oci"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strings"
 	"time"
 )
 
+var nixHashRe = regexp.MustCompile(`^[0-9abcdfghijklmnpqrsvwxyz]{32}$`)
+
 type Engine struct {
-	index       *oci.CacheIndex
-	gracePeriod time.Duration
+	index        *oci.CacheIndex
+	gracePeriod  time.Duration
+	keepVersions int
+}
+
+func (e *Engine) SetKeepVersions(n int) {
+	e.keepVersions = n
 }
 
 func NewEngine(index *oci.CacheIndex, gracePeriod time.Duration) *Engine {
@@ -72,6 +80,36 @@ func (e *Engine) Sweep(now time.Time, maxSize int64) *Result {
 		}
 
 		candidates = append(candidates, hash)
+	}
+
+	// 3.5 同软件保留 N 个版本
+	if e.keepVersions > 0 {
+		versionGroups := make(map[string][]string)
+		for hash, entry := range e.index.Entries {
+			if markedSet[hash] {
+				continue
+			}
+			base := basePackageName(entry.Name)
+			versionGroups[base] = append(versionGroups[base], hash)
+		}
+		for _, group := range versionGroups {
+			if len(group) <= e.keepVersions {
+				continue
+			}
+			sort.Slice(group, func(i, j int) bool {
+				return e.index.Entries[group[i]].UploadedAt.After(e.index.Entries[group[j]].UploadedAt)
+			})
+			for _, hash := range group[:e.keepVersions] {
+				markedSet[hash] = true
+				retainedSize += e.index.Entries[hash].NarSize
+			}
+		}
+		candidates = make([]string, 0)
+		for hash := range e.index.Entries {
+			if !markedSet[hash] {
+				candidates = append(candidates, hash)
+			}
+		}
 	}
 
 	sort.Slice(candidates, func(i, j int) bool {
@@ -227,13 +265,23 @@ func (e *Engine) CascadeEvict(targets []string) *Result {
 	}
 }
 
+func basePackageName(name string) string {
+	parts := strings.Split(name, "-")
+	for i := len(parts) - 1; i > 0; i-- {
+		if len(parts[i]) > 0 && parts[i][0] >= '0' && parts[i][0] <= '9' {
+			return strings.Join(parts[:i], "-")
+		}
+	}
+	return name
+}
+
 func getHashFromPath(storePath string) string {
 	base := filepath.Base(storePath)
 	if len(base) < 32 {
 		return ""
 	}
 	hash := base[:32]
-	if !nix.IsValidNixHash(hash) {
+	if !nixHashRe.MatchString(hash) {
 		return ""
 	}
 	return hash

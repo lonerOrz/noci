@@ -10,6 +10,7 @@ import (
 	"noci/pkg/publisher"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/spf13/cobra"
 )
@@ -22,6 +23,7 @@ var (
 	pushSkipUpstream    bool
 	pushJobs            int
 	pushProfile         bool
+	pushRegistries      []string
 )
 
 var pushCmd = &cobra.Command{
@@ -38,6 +40,7 @@ func init() {
 	pushCmd.Flags().IntVarP(&pushJobs, "jobs", "j", 0, "Zstd compression threads (0 = auto: min(4, max(1, NumCPU/2)))")
 	pushCmd.Flags().IntVar(&pushCompressionLevel, "compression-level", 3, "Zstd compression level (1-19, higher = smaller but slower)")
 	pushCmd.Flags().BoolVar(&pushProfile, "profile", false, "Print detailed performance profiling of the push pipeline")
+	pushCmd.Flags().StringArrayVar(&pushRegistries, "registries", nil, "Additional registries as registry/repo (can be specified multiple times)")
 }
 
 func runPush(cmd *cobra.Command, args []string) error {
@@ -124,10 +127,51 @@ func runPush(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("unsupported compression: %q (use 'zstd' or 'gzip')", pushCompression)
 	}
 
-	client := oci.NewClient(cfg.Registry, cfg.Repo, cfg.Token)
-	client.Profile = pushProfile
-	pub := publisher.NewPublisher(client, signer, pushSkipUpstream, comp, pushCompressionLevel, pushJobs)
-	pub.Profile = pushProfile
+	entries, err := ResolveRegistries(pushRegistries, cfg)
+	if err != nil {
+		return err
+	}
 
-	return pub.Publish(ctx, inputPaths)
+	if len(entries) == 1 {
+		client := oci.NewClient(entries[0].Registry, entries[0].Repo, entries[0].Token)
+		client.Profile = pushProfile
+		pub := publisher.NewPublisher(client, signer, pushSkipUpstream, comp, pushCompressionLevel, pushJobs)
+		pub.Profile = pushProfile
+		return pub.Publish(ctx, inputPaths)
+	}
+
+	// Multi-registry: fan out in parallel
+	log.Info("Pushing to %d registries...", len(entries))
+	var wg sync.WaitGroup
+	errCh := make(chan error, len(entries))
+	for _, entry := range entries {
+		wg.Add(1)
+		go func(e RegistryEntry) {
+			defer wg.Done()
+			client := oci.NewClient(e.Registry, e.Repo, e.Token)
+			client.Profile = pushProfile
+			pub := publisher.NewPublisher(client, signer, pushSkipUpstream, comp, pushCompressionLevel, pushJobs)
+			pub.Profile = pushProfile
+			if err := pub.Publish(ctx, inputPaths); err != nil {
+				log.Warning("Push to %s/%s failed: %v", e.Registry, e.Repo, err)
+				errCh <- fmt.Errorf("%s/%s: %w", e.Registry, e.Repo, err)
+			} else {
+				log.Success("Push to %s/%s completed.", e.Registry, e.Repo)
+			}
+		}(entry)
+	}
+	wg.Wait()
+	close(errCh)
+
+	var errs []error
+	for e := range errCh {
+		errs = append(errs, e)
+	}
+	if len(errs) == len(entries) {
+		return fmt.Errorf("all registries failed: %v", errs)
+	}
+	if len(errs) > 0 {
+		log.Warning("%d registries failed, %d succeeded.", len(errs), len(entries)-len(errs))
+	}
+	return nil
 }

@@ -3,6 +3,12 @@ on:
   schedule:
     - cron: "0 0 * * 0"
   workflow_dispatch:
+    inputs:
+      target-repositories:
+        description: 'JSON array of repositories to GC, e.g. ["owner/repo1","owner/repo2"]'
+        required: false
+        default: '["lonerOrz/noci", "lonerOrz/cachyos-loner"]'
+        type: string
 
 jobs:
   gc-and-vacuum:
@@ -12,7 +18,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target-repository: ["lonerOrz/noci", "lonerOrz/cachyos-loner"]
+        target-repository: ${{ fromJSON(github.event.inputs.target-repositories || '["lonerOrz/noci", "lonerOrz/cachyos-loner"]') }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4

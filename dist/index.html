@@ -1,91 +1,76 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>noci cache dashboard</title>
-    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <link rel="stylesheet" href="/style.css" />
-    <script src="/app.js" defer></script>
-  </head>
-  <body>
-    <div class="page-container">
-      <header class="page-header">
-        <div class="header-left">
-          <div class="logo-group">
-            <span class="logo-icon">📦</span>
-            <h1 class="page-title">noci dashboard</h1>
-          </div>
-          <p class="header-subtitle" id="repo-name">OCI Repository: --</p>
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>noci — Cache Dashboard</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg"/>
+  <link rel="stylesheet" href="/style.css"/>
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <div class="page-container">
+    <header class="page-header">
+      <div class="header-left">
+        <div class="logo-group">
+          <svg class="logo-mark" width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+            <path d="M10 2v16M2 10h16"/>
+            <path d="M4.5 4.5l11 11M15.5 4.5l-11 11"/>
+          </svg>
+          <h1 class="page-title">noci</h1>
         </div>
-        <div id="status-badge" class="status-badge"></div>
-      </header>
-
-      <section class="quick-start-card">
-        <h2 class="card-title">Quick Start</h2>
-        <div class="command-bar">
-          <code class="command-text" id="nix-cmd"
-            >nix build .#package --substituters "http://127.0.0.1:8080" --option
-            require-sigs false</code
-          >
-          <button onclick="copyCmd(event)" class="copy-btn">Copy</button>
-        </div>
-      </section>
-
-      <div class="stats-grid">
-        <div class="stat-card">
-          <div class="stat-label"><span>📦</span>Cached Packages</div>
-          <div class="stat-value" id="stat-count">0</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-label"><span>💾</span>Total Cache Size</div>
-          <div class="stat-value" id="stat-size">0 B</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-label"><span>🌐</span>Registry Endpoint</div>
-          <div class="stat-value endpoint" id="stat-endpoint">-</div>
-        </div>
+        <p class="header-repo" id="repo-name">OCI Repository: —</p>
       </div>
+      <div id="status-badge" class="status-badge"></div>
+    </header>
 
-      <div class="search-box">
-        <svg
-          class="search-icon"
-          fill="none"
-          viewBox="0 0 24 24"
-          stroke-width="2"
-          stroke="currentColor"
-        >
-          <path
-            stroke-linecap="round"
-            stroke-linejoin="round"
-            d="m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.637 10.637Z"
-          />
-        </svg>
-        <input
-          type="text"
-          id="search-input"
-          placeholder="Search packages by name, store path, or hash..."
-          class="search-input"
-        />
+    <section class="quickstart-card">
+      <span class="quickstart-eyebrow">Quick Start</span>
+      <div class="code-block">
+        <code class="code-block-text" id="nix-cmd">nix build .#package --substituters "http://127.0.0.1:8080" --option require-sigs false</code>
+        <button onclick="copyCmd(event)" class="copy-btn">Copy</button>
       </div>
+    </section>
 
-      <div class="table-card">
-        <div class="table-wrapper">
-          <table class="data-table">
-            <thead>
-              <tr>
-                <th>Package Name</th>
-                <th>Hash</th>
-                <th>Size</th>
-                <th>Uploaded At</th>
-                <th id="actions-header" class="action-header">Actions</th>
-              </tr>
-            </thead>
-            <tbody id="package-rows"></tbody>
-          </table>
-        </div>
-        <div id="pagination-controls"></div>
+    <div class="stats-grid">
+      <div class="stat-card">
+        <div class="stat-label">Cached Packages</div>
+        <div class="stat-value" id="stat-count">0</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Total Cache Size</div>
+        <div class="stat-value" id="stat-size">0 B</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Registry Endpoint</div>
+        <div class="stat-value stat-value-mono" id="stat-endpoint">—</div>
       </div>
     </div>
-  </body>
+
+    <div class="search-box">
+      <svg class="search-icon" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+        <path stroke-linecap="round" stroke-linejoin="round" d="m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.637 10.637Z"/>
+      </svg>
+      <input type="text" id="search-input" placeholder="Search packages by name, store path, or hash&hellip;" class="search-input"/>
+    </div>
+
+    <section class="table-card">
+      <div class="table-wrapper">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Package Name</th>
+              <th>Hash</th>
+              <th>Size</th>
+              <th>Uploaded At</th>
+              <th id="actions-header" class="action-header"></th>
+            </tr>
+          </thead>
+          <tbody id="package-rows"></tbody>
+        </table>
+      </div>
+      <div id="pagination-controls"></div>
+    </section>
+  </div>
+</body>
 </html>
