@@ -245,13 +245,15 @@ async function deletePackage(event, hash, name) {
   btn.innerHTML = "Deleting...";
 
   const backupEntries = [...entries];
-  entries = entries.filter((e) => e.hash !== hash);
-  renderEntries();
 
   try {
     const res = await fetch(`/api/delete/${hash}`, { method: "DELETE" });
     if (res.ok) {
-      await checkUpdate();
+      await fetchPage();
+      try {
+        const r = await fetch("/api/digest");
+        if (r.ok) localDigest = await r.text();
+      } catch (_) {}
     } else {
       rollbackUI(backupEntries, btn, originalText);
       const errText = await res.text();
