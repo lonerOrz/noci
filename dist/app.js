@@ -199,15 +199,11 @@ function copyCmd(event) {
   navigator.clipboard.writeText(cmdText).then(() => {
     const btn = event.currentTarget || event.target;
     const originalText = btn.innerText;
-    btn.innerText = "Copied!";
-    btn.style.backgroundColor = "var(--accent-emerald)";
-    btn.style.borderColor = "var(--accent-emerald)";
-    btn.style.color = "white";
+    btn.innerText = "Copied";
+    btn.classList.add("copy-btn-copied");
     setTimeout(() => {
       btn.innerText = originalText;
-      btn.style.backgroundColor = "var(--bg-secondary)";
-      btn.style.borderColor = "var(--border-normal)";
-      btn.style.color = "var(--text-secondary)";
+      btn.classList.remove("copy-btn-copied");
     }, 1500);
   });
 }
