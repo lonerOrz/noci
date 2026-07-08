@@ -590,19 +590,45 @@ func (c *Client) UploadBlob(ctx context.Context, filePath, sha256Hex, descriptio
 	stat, _ := file.Stat()
 
 	pr := newProgressReader(file, stat.Size(), description)
-	req, err := http.NewRequestWithContext(ctx, "PUT", uploadURL, pr)
-	if err != nil {
-		fmt.Println()
-		return "", err
-	}
-
 	token, _ := c.getOciToken(ctx, "pull,push")
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Content-Type", "application/octet-stream")
 
-	req.ContentLength = stat.Size()
+	var putResp *http.Response
+	const maxRetries = 3
+	backoff := time.Second
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		// Re-open file for retry (io.Reader consumed on first attempt)
+		if attempt > 0 {
+			file.Seek(0, io.SeekStart)
+			pr = newProgressReader(file, stat.Size(), description)
+			freshToken, tokenErr := c.getOciToken(ctx, "pull,push")
+			if tokenErr != nil {
+				fmt.Println()
+				return "", fmt.Errorf("refresh token for upload PUT: %w", tokenErr)
+			}
+			token = freshToken
+		}
 
-	putResp, err := c.client.Do(req)
+		req, err := http.NewRequestWithContext(ctx, "PUT", uploadURL, pr)
+		if err != nil {
+			fmt.Println()
+			return "", err
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/octet-stream")
+		req.ContentLength = stat.Size()
+
+		putResp, err = c.client.Do(req)
+		if err == nil && putResp.StatusCode < 500 {
+			break
+		}
+		if putResp != nil {
+			putResp.Body.Close()
+		}
+		if attempt < maxRetries {
+			time.Sleep(backoff)
+			backoff *= 2
+		}
+	}
 	if err != nil {
 		fmt.Println()
 		return "", err
@@ -688,18 +714,44 @@ func (c *Client) UploadBlobMonolithic(ctx context.Context, filePath, sha256Hex, 
 		fmt.Fprintf(os.Stderr, "\r\u001b[K▶ [noci] Uploading %s... %s", description, FormatSize(size))
 	}
 
-	putReq, err := http.NewRequestWithContext(ctx, "PUT", uploadURL, file)
-	if err != nil {
-		return "", 0, fmt.Errorf("failed to create PUT request: %w", err)
+	var putResp *http.Response
+	var netTime time.Duration
+	const maxRetries = 3
+	backoff := time.Second
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		// Re-open file for retry
+		if attempt > 0 {
+			file.Seek(0, io.SeekStart)
+			freshToken, tokenErr := c.getOciToken(ctx, "pull,push")
+			if tokenErr != nil {
+				return "", 0, fmt.Errorf("refresh token for monolithic upload: %w", tokenErr)
+			}
+			token = freshToken
+		}
+
+		putReq, err := http.NewRequestWithContext(ctx, "PUT", uploadURL, file)
+		if err != nil {
+			return "", 0, fmt.Errorf("failed to create PUT request: %w", err)
+		}
+		putReq.Header.Set("Authorization", "Bearer "+token)
+		putReq.Header.Set("Content-Type", "application/octet-stream")
+		putReq.ContentLength = size
+
+		startNet := time.Now()
+		putResp, err = c.client.Do(putReq)
+		netTime = time.Since(startNet)
+
+		if err == nil && putResp.StatusCode < 500 {
+			break
+		}
+		if putResp != nil {
+			putResp.Body.Close()
+		}
+		if attempt < maxRetries {
+			time.Sleep(backoff)
+			backoff *= 2
+		}
 	}
-	putReq.Header.Set("Authorization", "Bearer "+token)
-	putReq.Header.Set("Content-Type", "application/octet-stream")
-	putReq.ContentLength = size
-
-	startNet := time.Now()
-	putResp, err := c.client.Do(putReq)
-	netTime := time.Since(startNet)
-
 	if err != nil {
 		return "", 0, fmt.Errorf("monolithic upload failed: %w", err)
 	}
@@ -833,7 +885,7 @@ func (c *Client) UploadBlobChunked(ctx context.Context, filePath, sha256Hex, des
 		}
 	}
 
-	// Final PUT to complete
+	// Final PUT to complete — refresh token and retry on transient failures
 	finalURL := u.String()
 	if strings.Contains(finalURL, "?") {
 		finalURL += "&digest=" + digest
@@ -841,14 +893,35 @@ func (c *Client) UploadBlobChunked(ctx context.Context, filePath, sha256Hex, des
 		finalURL += "?digest=" + digest
 	}
 
-	putReq, err := http.NewRequestWithContext(ctx, "PUT", finalURL, nil)
-	if err != nil {
-		return "", err
-	}
-	putReq.Header.Set("Authorization", "Bearer "+token)
-	putReq.Header.Set("Content-Type", "application/octet-stream")
+	var putResp *http.Response
+	const maxRetries = 3
+	backoff := time.Second
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		// Refresh token before each attempt (GHCR tokens expire ~5min)
+		freshToken, tokenErr := c.getOciToken(ctx, "pull,push")
+		if tokenErr != nil {
+			return "", fmt.Errorf("refresh token for final PUT: %w", tokenErr)
+		}
 
-	putResp, err := c.client.Do(putReq)
+		putReq, err := http.NewRequestWithContext(ctx, "PUT", finalURL, nil)
+		if err != nil {
+			return "", err
+		}
+		putReq.Header.Set("Authorization", "Bearer "+freshToken)
+		putReq.Header.Set("Content-Type", "application/octet-stream")
+
+		putResp, err = c.client.Do(putReq)
+		if err == nil && putResp.StatusCode < 500 {
+			break
+		}
+		if putResp != nil {
+			putResp.Body.Close()
+		}
+		if attempt < maxRetries {
+			time.Sleep(backoff)
+			backoff *= 2
+		}
+	}
 	if err != nil {
 		return "", fmt.Errorf("chunked upload final PUT failed: %w", err)
 	}
