@@ -782,6 +782,7 @@ func (c *Client) UploadBlobMonolithic(ctx context.Context, filePath, sha256Hex, 
 func (c *Client) UploadBlobChunked(ctx context.Context, filePath, sha256Hex, description string, chunkSize int64) (string, error) {
 	digest := "sha256:" + sha256Hex
 
+	// HEAD check — skip upload if blob already exists
 	headResp, err := c.Request(ctx, "HEAD", "/blobs/"+digest, nil, "")
 	if err == nil && headResp.StatusCode == http.StatusOK {
 		headResp.Body.Close()
@@ -791,6 +792,7 @@ func (c *Client) UploadBlobChunked(ctx context.Context, filePath, sha256Hex, des
 		headResp.Body.Close()
 	}
 
+	// POST to initiate chunked upload session
 	initResp, err := c.Request(ctx, "POST", "/blobs/uploads/", nil, "")
 	if err != nil {
 		return "", err
@@ -828,47 +830,86 @@ func (c *Client) UploadBlobChunked(ctx context.Context, filePath, sha256Hex, des
 	}
 	totalSize := stat.Size()
 
-	token, err := c.getOciToken(ctx, "pull,push")
-	if err != nil {
-		return "", err
-	}
+	isTTY := term.IsTerminal(int(os.Stderr.Fd()))
+	lastPrint := time.Time{}
+	lastBucket := -1
 
+	// PATCH loop — upload chunks with Content-Range and per-chunk retry
 	var offset int64
 	buf := make([]byte, chunkSize)
 	for offset < totalSize {
 		n, readErr := file.Read(buf)
 		if n > 0 {
-			patchURL := u.String()
-			if offset+int64(n) < totalSize {
-				// Intermediate PATCH — server returns new Location with state
-				q := u.Query()
-				q.Set("state", strconv.FormatInt(offset, 10))
-				u.RawQuery = q.Encode()
-				patchURL = u.String()
+			chunkStart := offset
+			chunkEnd := offset + int64(n) - 1 // OCI closed interval
+
+			var resp *http.Response
+			const maxRetries = 3
+			backoff := time.Second
+			var patchErr error
+
+			for attempt := 0; attempt <= maxRetries; attempt++ {
+				select {
+				case <-ctx.Done():
+					return "", ctx.Err()
+				default:
+				}
+
+				// On retry, seek back and re-read the chunk
+				if attempt > 0 {
+					if _, seekErr := file.Seek(chunkStart, io.SeekStart); seekErr != nil {
+						return "", fmt.Errorf("seek for chunk retry: %w", seekErr)
+					}
+					if _, rErr := io.ReadFull(file, buf[:n]); rErr != nil {
+						return "", fmt.Errorf("re-read chunk: %w", rErr)
+					}
+				}
+
+				freshToken, tokenErr := c.getOciToken(ctx, "pull,push")
+				if tokenErr != nil {
+					return "", fmt.Errorf("get token: %w", tokenErr)
+				}
+
+				// Use Location URL as-is — never manipulate query params (registry session tokens are sacred)
+				req, err := http.NewRequestWithContext(ctx, "PATCH", u.String(), bytes.NewReader(buf[:n]))
+				if err != nil {
+					return "", err
+				}
+				req.Header.Set("Authorization", "Bearer "+freshToken)
+				req.Header.Set("Content-Type", "application/octet-stream")
+				req.Header.Set("Content-Length", strconv.Itoa(n))
+				req.Header.Set("Content-Range", fmt.Sprintf("%d-%d", chunkStart, chunkEnd))
+				req.ContentLength = int64(n)
+
+				resp, err = c.client.Do(req)
+				if err == nil {
+					if resp.StatusCode == http.StatusAccepted || resp.StatusCode == http.StatusCreated || resp.StatusCode == http.StatusOK {
+						patchErr = nil
+						break
+					}
+					if resp.StatusCode < 500 {
+						bodyBytes, _ := io.ReadAll(resp.Body)
+						resp.Body.Close()
+						return "", fmt.Errorf("PATCH failed at offset %d: HTTP %d, %s", chunkStart, resp.StatusCode, string(bodyBytes))
+					}
+					resp.Body.Close()
+					patchErr = fmt.Errorf("server error HTTP %d at offset %d", resp.StatusCode, chunkStart)
+				} else {
+					patchErr = err
+				}
+
+				if attempt < maxRetries {
+					time.Sleep(backoff)
+					backoff *= 2
+				}
+			}
+			if patchErr != nil {
+				return "", fmt.Errorf("PATCH failed after retries: %w", patchErr)
 			}
 
-			req, err := http.NewRequestWithContext(ctx, "PATCH", patchURL, bytes.NewReader(buf[:n]))
-			if err != nil {
-				return "", err
-			}
-			req.Header.Set("Authorization", "Bearer "+token)
-			req.Header.Set("Content-Type", "application/octet-stream")
-			req.Header.Set("Content-Length", strconv.Itoa(n))
-			req.ContentLength = int64(n)
-
-			resp, err := c.client.Do(req)
-			if err != nil {
-				return "", fmt.Errorf("chunked upload PATCH failed at offset %d: %w", offset, err)
-			}
-
-			if resp.StatusCode != http.StatusAccepted && resp.StatusCode != http.StatusCreated {
-				bodyBytes, _ := io.ReadAll(resp.Body)
-				resp.Body.Close()
-				return "", fmt.Errorf("chunked upload PATCH failed at offset %d: HTTP %d, %s", offset, resp.StatusCode, string(bodyBytes))
-			}
-			resp.Body.Close()
-
+			// Update Location from response — trust the registry's next URL verbatim
 			newLoc := resp.Header.Get("Location")
+			resp.Body.Close()
 			if newLoc != "" {
 				newU, err := url.Parse(newLoc)
 				if err == nil {
@@ -881,13 +922,36 @@ func (c *Client) UploadBlobChunked(ctx context.Context, filePath, sha256Hex, des
 			}
 
 			offset += int64(n)
+
+			// Progress reporting
+			pct := float64(offset) * 100 / float64(totalSize)
+			if isTTY {
+				now := time.Now()
+				if lastPrint.IsZero() || offset == totalSize || now.Sub(lastPrint) >= 200*time.Millisecond {
+					fmt.Fprintf(os.Stderr, "\r\x1b[K\u25b6 [noci] Uploading %s... %.1f%% (%s / %s)", description, pct, FormatSize(offset), FormatSize(totalSize))
+					lastPrint = now
+				}
+			} else {
+				bucket := int(pct) / 10
+				for bucket > lastBucket {
+					lastBucket++
+					fmt.Fprintf(os.Stderr, "\u25b6 [noci] Uploading %s... %d%% (%s / %s)\n", description, lastBucket*10, FormatSize(offset), FormatSize(totalSize))
+				}
+			}
 		}
 		if readErr != nil {
+			if readErr != io.EOF {
+				return "", readErr
+			}
 			break
 		}
 	}
 
-	// Final PUT to complete — refresh token and retry on transient failures
+	if isTTY {
+		fmt.Fprintln(os.Stderr)
+	}
+
+	// Final PUT — commit the upload with digest, retry with fresh token
 	finalURL := u.String()
 	if strings.Contains(finalURL, "?") {
 		finalURL += "&digest=" + digest
@@ -899,7 +963,12 @@ func (c *Client) UploadBlobChunked(ctx context.Context, filePath, sha256Hex, des
 	const maxRetries = 3
 	backoff := time.Second
 	for attempt := 0; attempt <= maxRetries; attempt++ {
-		// Refresh token before each attempt (GHCR tokens expire ~5min)
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		default:
+		}
+
 		freshToken, tokenErr := c.getOciToken(ctx, "pull,push")
 		if tokenErr != nil {
 			return "", fmt.Errorf("refresh token for final PUT: %w", tokenErr)
@@ -911,6 +980,7 @@ func (c *Client) UploadBlobChunked(ctx context.Context, filePath, sha256Hex, des
 		}
 		putReq.Header.Set("Authorization", "Bearer "+freshToken)
 		putReq.Header.Set("Content-Type", "application/octet-stream")
+		putReq.Header.Set("Content-Length", "0")
 
 		putResp, err = c.client.Do(putReq)
 		if err == nil && putResp.StatusCode < 500 {
@@ -925,13 +995,13 @@ func (c *Client) UploadBlobChunked(ctx context.Context, filePath, sha256Hex, des
 		}
 	}
 	if err != nil {
-		return "", fmt.Errorf("chunked upload final PUT failed: %w", err)
+		return "", fmt.Errorf("final PUT failed: %w", err)
 	}
 	defer putResp.Body.Close()
 
-	if putResp.StatusCode != http.StatusCreated && putResp.StatusCode != http.StatusAccepted {
+	if putResp.StatusCode != http.StatusCreated && putResp.StatusCode != http.StatusAccepted && putResp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(putResp.Body)
-		return "", fmt.Errorf("chunked upload final PUT failed: HTTP %d, %s", putResp.StatusCode, string(bodyBytes))
+		return "", fmt.Errorf("final PUT failed: HTTP %d, %s", putResp.StatusCode, string(bodyBytes))
 	}
 
 	return digest, nil
