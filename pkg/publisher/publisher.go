@@ -15,6 +15,78 @@ import (
 	"time"
 )
 
+// ExportCacheEntry holds a pre-exported compressed NAR file shared across registries.
+type ExportCacheEntry struct {
+	TempFile string
+	FileHash string
+	FileSize int64
+}
+
+type cacheProgress struct {
+	done  chan struct{}
+	entry *ExportCacheEntry
+	err   error
+}
+
+// ExportCache ensures nix.ExportAndCompress runs at most once per store path
+// across all registries. Concurrent callers for the same path block until the
+// first export completes, then share the result.
+type ExportCache struct {
+	mu    sync.Mutex
+	paths map[string]*cacheProgress
+}
+
+func NewExportCache() *ExportCache {
+	return &ExportCache{paths: make(map[string]*cacheProgress)}
+}
+
+func (c *ExportCache) GetOrCreate(ctx context.Context, storePath string, exportFn func() (*ExportCacheEntry, error)) (*ExportCacheEntry, error) {
+	if c == nil {
+		return exportFn()
+	}
+
+	c.mu.Lock()
+	if prog, exists := c.paths[storePath]; exists {
+		c.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-prog.done:
+			return prog.entry, prog.err
+		}
+	}
+
+	prog := &cacheProgress{done: make(chan struct{})}
+	c.paths[storePath] = prog
+	c.mu.Unlock()
+
+	entry, err := exportFn()
+	prog.entry = entry
+	prog.err = err
+	close(prog.done)
+
+	return entry, err
+}
+
+func (c *ExportCache) Cleanup() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	progs := make([]*cacheProgress, 0, len(c.paths))
+	for _, prog := range c.paths {
+		progs = append(progs, prog)
+	}
+	c.mu.Unlock()
+
+	for _, prog := range progs {
+		<-prog.done
+		if prog.err == nil && prog.entry != nil && prog.entry.TempFile != "" {
+			os.Remove(prog.entry.TempFile)
+		}
+	}
+}
+
 type Publisher struct {
 	client       *oci.Client
 	signer       *nix.Signer
@@ -23,9 +95,10 @@ type Publisher struct {
 	compLevel    int
 	jobs         int
 	Profile      bool
+	cache        *ExportCache
 }
 
-func NewPublisher(client *oci.Client, signer *nix.Signer, skipUpstream bool, comp string, compLevel int, jobs int) *Publisher {
+func NewPublisher(client *oci.Client, signer *nix.Signer, skipUpstream bool, comp string, compLevel int, jobs int, cache *ExportCache) *Publisher {
 	if client == nil || signer == nil {
 		panic("publisher: client and signer must not be nil")
 	}
@@ -36,6 +109,7 @@ func NewPublisher(client *oci.Client, signer *nix.Signer, skipUpstream bool, com
 		comp:         comp,
 		compLevel:    compLevel,
 		jobs:         jobs,
+		cache:        cache,
 	}
 }
 
@@ -344,11 +418,30 @@ func (p *Publisher) publishSingle(ctx context.Context, info nix.PathInfo) (uploa
 
 	exportStart := time.Now()
 
-	tempFile, fileHash, fileSize, err := nix.ExportAndCompress(ctx, info.Path, p.comp, p.jobs, p.compLevel)
-	if err != nil {
-		return uploadResult{}, fmt.Errorf("export failed: %w", err)
+	var tempFile, fileHash string
+	var fileSize int64
+	var err error
+
+	if p.cache != nil {
+		entry, cacheErr := p.cache.GetOrCreate(ctx, info.Path, func() (*ExportCacheEntry, error) {
+			tFile, hash, size, e := nix.ExportAndCompress(ctx, info.Path, p.comp, p.jobs, p.compLevel)
+			if e != nil {
+				return nil, e
+			}
+			return &ExportCacheEntry{TempFile: tFile, FileHash: hash, FileSize: size}, nil
+		})
+		if cacheErr != nil {
+			return uploadResult{}, fmt.Errorf("export failed: %w", cacheErr)
+		}
+		tempFile, fileHash, fileSize = entry.TempFile, entry.FileHash, entry.FileSize
+	} else {
+		tempFile, fileHash, fileSize, err = nix.ExportAndCompress(ctx, info.Path, p.comp, p.jobs, p.compLevel)
+		if err != nil {
+			return uploadResult{}, fmt.Errorf("export failed: %w", err)
+		}
+		defer os.Remove(tempFile)
 	}
-	defer os.Remove(tempFile)
+
 	exportDuration := time.Since(exportStart)
 
 	digest, err := p.client.UploadBlobChunked(ctx, tempFile, fileHash, "NAR", 8*1024*1024)
