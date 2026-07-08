@@ -42,7 +42,6 @@ async function run() {
     const hookLogPath = `/tmp/noci-build-paths-${runId}-${runAttempt}.log`;
     utils.saveState("hook-log-path", hookLogPath);
 
-    fs.writeFileSync(hookLogPath, "", { mode: 0o666 });
     fs.writeFileSync(
       "/tmp/noci-hook.sh",
       `#!/bin/sh
