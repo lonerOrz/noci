@@ -36,8 +36,12 @@ async function run() {
     process.env.NOCI_TOKEN = token;
     if (signingKey) process.env.NOCI_SIGNING_KEY = signingKey;
 
-    const hookLogPath = "/tmp/noci-build-paths.log";
-    // Pre-create with world-writable permissions so nix-daemon (root) can append
+    // Unique log path per run attempt — avoids cross-job collisions on self-hosted runners
+    const runId = process.env.GITHUB_RUN_ID || "default";
+    const runAttempt = process.env.GITHUB_RUN_ATTEMPT || "1";
+    const hookLogPath = `/tmp/noci-build-paths-${runId}-${runAttempt}.log`;
+    utils.saveState("hook-log-path", hookLogPath);
+
     fs.writeFileSync(hookLogPath, "", { mode: 0o666 });
     fs.writeFileSync(
       "/tmp/noci-hook.sh",
