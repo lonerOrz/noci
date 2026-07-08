@@ -37,6 +37,8 @@ async function run() {
     if (signingKey) process.env.NOCI_SIGNING_KEY = signingKey;
 
     const hookLogPath = "/tmp/noci-build-paths.log";
+    // Pre-create with world-writable permissions so nix-daemon (root) can append
+    fs.writeFileSync(hookLogPath, "", { mode: 0o666 });
     fs.writeFileSync(
       "/tmp/noci-hook.sh",
       `#!/bin/sh

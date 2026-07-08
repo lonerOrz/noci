@@ -73,12 +73,14 @@ func (c *Client) getOciToken(ctx context.Context, actions string) (string, error
 	c.tokenMu.Lock()
 	defer c.tokenMu.Unlock()
 
+	// GHCR tokens expire in ~5 min; cache for 4 min to ensure fresh token on retry
+	const tokenCacheTTL = 4 * time.Minute
 	if actions == "pull" {
-		if c.ociTokenPull != "" && time.Since(c.pullFetchTime) < 45*time.Minute {
+		if c.ociTokenPull != "" && time.Since(c.pullFetchTime) < tokenCacheTTL {
 			return c.ociTokenPull, nil
 		}
 	} else {
-		if c.ociTokenPush != "" && time.Since(c.pushFetchTime) < 45*time.Minute {
+		if c.ociTokenPush != "" && time.Since(c.pushFetchTime) < tokenCacheTTL {
 			return c.ociTokenPush, nil
 		}
 	}
