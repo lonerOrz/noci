@@ -418,7 +418,7 @@ func (c *Client) fallbackUntagManifest(ctx context.Context, tag string) error {
 		MediaType:     "application/vnd.oci.image.manifest.v1+json",
 		Config: Descriptor{
 			MediaType: "application/vnd.noci.dummy.config.v1+json",
-			Size:      2,
+			Size:      0,
 			Digest:    "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
 		},
 		Annotations: map[string]string{
@@ -520,7 +520,7 @@ func (c *Client) PushIndex(ctx context.Context, idx *CacheIndex) error {
 		MediaType:     "application/vnd.oci.image.manifest.v1+json",
 		Config: Descriptor{
 			MediaType: "application/vnd.noci.index.config.v1+json",
-			Size:      2,
+			Size:      0,
 			Digest:    "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
 		},
 		Layers: []Descriptor{

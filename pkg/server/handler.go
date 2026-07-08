@@ -329,7 +329,7 @@ func (s *Server) streamBlob(w http.ResponseWriter, r *http.Request, digest strin
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == http.StatusTemporaryRedirect || resp.StatusCode == http.StatusFound {
+	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
 		w.Header().Set("Location", resp.Header.Get("Location"))
 		w.WriteHeader(resp.StatusCode)
 		return
