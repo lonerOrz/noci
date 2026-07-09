@@ -113,7 +113,7 @@ func (s *Server) Start(ctx context.Context) error {
 	cancel()
 
 	s.StartPreflightProbe()
-	go s.startActiveSyncLoop(ctx, 5*time.Second)
+	go s.startActiveSyncLoop(ctx, 30*time.Second)
 	go s.startCleanupLoop(ctx)
 
 	mux := http.NewServeMux()
@@ -213,6 +213,13 @@ func (s *Server) startCleanupLoop(ctx context.Context) {
 			if s.limiter != nil {
 				s.limiter.cleanup()
 			}
+			// Clean up expired negCache entries (stale > 30s) to prevent unbounded memory growth
+			s.negCache.Range(func(key, value interface{}) bool {
+				if t, ok := value.(time.Time); ok && time.Since(t) > 30*time.Second {
+					s.negCache.Delete(key)
+				}
+				return true
+			})
 		}
 	}
 }

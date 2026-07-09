@@ -2,9 +2,11 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"noci/pkg/oci"
+	"strings"
 	"testing"
 )
 
@@ -83,5 +85,55 @@ func TestHealthz_IndexNotLoaded(t *testing.T) {
 	}
 	if resp.EntryCount != 0 {
 		t.Errorf("EntryCount = %d, want 0", resp.EntryCount)
+	}
+}
+
+func TestStreamBlob_RedirectHandling(t *testing.T) {
+	const location = "https://cdn.example.com/blobs/some-uuid"
+
+	var redirectCode int
+
+	mockServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/token") {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"token":"mock-token"}`)
+			return
+		}
+		if strings.Contains(r.URL.Path, "/blobs/") {
+			w.Header().Set("Location", location)
+			w.WriteHeader(redirectCode)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer mockServer.Close()
+
+	u := mockServer.URL
+	registry := strings.TrimPrefix(u, "https://")
+	client := oci.NewClient(registry, "user/repo", "test-token")
+	client.SetHTTPClient(mockServer.Client())
+
+	s := &Server{client: client}
+
+	codes := []int{
+		http.StatusMovedPermanently,
+		http.StatusFound,
+		http.StatusTemporaryRedirect,
+		http.StatusPermanentRedirect,
+	}
+
+	for _, code := range codes {
+		redirectCode = code
+		req := httptest.NewRequest("GET", "/nar/abc.nar", nil)
+		w := httptest.NewRecorder()
+
+		s.streamBlob(w, req, "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+
+		if w.Code != code {
+			t.Errorf("redirect %d: got status %d", code, w.Code)
+		}
+		if got := w.Header().Get("Location"); got != location {
+			t.Errorf("redirect %d: Location = %q, want %q", code, got, location)
+		}
 	}
 }

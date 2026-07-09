@@ -13,7 +13,7 @@ async function run() {
   if (!proxyPid || !repo || !signingKey) return;
 
   try {
-    const hookLogPath = "/tmp/noci-build-paths.log";
+    const hookLogPath = utils.getState("hook-log-path") || "/tmp/noci-build-paths.log";
     if (!fs.existsSync(hookLogPath)) {
       console.log("[noci-action] No build paths recorded. Skipping push.");
       return;
@@ -61,7 +61,7 @@ async function run() {
     utils.fail(error.message);
   } finally {
     try {
-      fs.unlinkSync("/tmp/noci-build-paths.log");
+      fs.unlinkSync(hookLogPath);
     } catch (e) {}
     try {
       fs.unlinkSync("/tmp/noci-hook.sh");

@@ -104,6 +104,44 @@ func TestNormalizeNarHash_SRIBadLength(t *testing.T) {
 	}
 }
 
+func TestHexToNixBase32(t *testing.T) {
+	// SHA-256("test") hex
+	hexInput := "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+	got, err := HexToNixBase32(hexInput)
+	if err != nil {
+		t.Fatalf("HexToNixBase32: %v", err)
+	}
+	if len(got) != 52 {
+		t.Errorf("len = %d, want 52", len(got))
+	}
+	for _, c := range got {
+		found := false
+		for _, v := range NixAlphabet {
+			if c == v {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("invalid nix32 char %q", c)
+		}
+	}
+}
+
+func TestHexToNixBase32_BadHex(t *testing.T) {
+	_, err := HexToNixBase32("not-hex")
+	if err == nil {
+		t.Error("expected error for invalid hex")
+	}
+}
+
+func TestHexToNixBase32_WrongLength(t *testing.T) {
+	_, err := HexToNixBase32("aabb")
+	if err == nil {
+		t.Error("expected error for wrong length")
+	}
+}
+
 func TestEncodeNixBase32(t *testing.T) {
 	// Test with known 32-byte input
 	input := make([]byte, 32)

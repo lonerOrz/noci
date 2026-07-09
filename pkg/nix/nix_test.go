@@ -81,6 +81,30 @@ func TestParseJSONBuildOutputs_InvalidJSON(t *testing.T) {
 	}
 }
 
+func TestGetPathHash_EdgeCases(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"standard store path", "/nix/store/0abc1234567890abc1234567890abc12-hello", "0abc1234567890abc1234567890abc12"},
+		{"trailing slash", "/nix/store/0abc1234567890abc1234567890abc12-hello/", "0abc1234567890abc1234567890abc12"},
+		{"double slash", "/nix/store//0abc1234567890abc1234567890abc12-hello", "0abc1234567890abc1234567890abc12"},
+		{"relative dot segments", "/nix/store/./0abc1234567890abc1234567890abc12-hello/.", "0abc1234567890abc1234567890abc12"},
+		{"trailing slash on short path", "/nix/store/short/", ""},
+		{"dot-only path", "/nix/store/.", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := GetPathHash(tt.input)
+			if got != tt.want {
+				t.Errorf("GetPathHash(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestParseJSONBuildOutputs_NoOutputs(t *testing.T) {
 	input := []byte(`[{"other":"field"}]`)
 	paths, err := ParseJSONBuildOutputs(input)
