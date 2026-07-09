@@ -74,6 +74,115 @@ func TestParseNextLink(t *testing.T) {
 	}
 }
 
+func TestDeleteManifest_FallbackOnMethodNotAllowed(t *testing.T) {
+	var deleteCalled, putCalled bool
+
+	mockServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/token") {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"token":"mock-token"}`)
+			return
+		}
+		if r.Method == "DELETE" && strings.Contains(r.URL.Path, "/manifests/tag-to-delete") {
+			deleteCalled = true
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		if r.Method == "PUT" && strings.Contains(r.URL.Path, "/manifests/tag-to-delete") {
+			putCalled = true
+			w.WriteHeader(http.StatusCreated)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer mockServer.Close()
+
+	u, _ := url.Parse(mockServer.URL)
+	client := NewClient(u.Host, "user/repo", "token")
+	client.SetHTTPClient(mockServer.Client())
+
+	err := client.DeleteManifest(context.Background(), "tag-to-delete")
+	if err != nil {
+		t.Fatalf("DeleteManifest: %v", err)
+	}
+	if !deleteCalled {
+		t.Error("DELETE was never called")
+	}
+	if !putCalled {
+		t.Error("fallback PUT was never called")
+	}
+}
+
+func TestDeleteManifest_FallbackOnForbidden(t *testing.T) {
+	var putCalled bool
+
+	mockServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/token") {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"token":"mock-token"}`)
+			return
+		}
+		if r.Method == "DELETE" && strings.Contains(r.URL.Path, "/manifests/tag-to-delete") {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		if r.Method == "PUT" && strings.Contains(r.URL.Path, "/manifests/tag-to-delete") {
+			putCalled = true
+			w.WriteHeader(http.StatusCreated)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer mockServer.Close()
+
+	u, _ := url.Parse(mockServer.URL)
+	client := NewClient(u.Host, "user/repo", "token")
+	client.SetHTTPClient(mockServer.Client())
+
+	err := client.DeleteManifest(context.Background(), "tag-to-delete")
+	if err != nil {
+		t.Fatalf("DeleteManifest: %v", err)
+	}
+	if !putCalled {
+		t.Error("fallback PUT was not triggered on 403")
+	}
+}
+
+func TestDeleteManifest_FallbackOnUnauthorized(t *testing.T) {
+	var putCalled bool
+
+	mockServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/token") {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"token":"mock-token"}`)
+			return
+		}
+		if r.Method == "DELETE" && strings.Contains(r.URL.Path, "/manifests/tag-to-delete") {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		if r.Method == "PUT" && strings.Contains(r.URL.Path, "/manifests/tag-to-delete") {
+			putCalled = true
+			w.WriteHeader(http.StatusCreated)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer mockServer.Close()
+
+	u, _ := url.Parse(mockServer.URL)
+	client := NewClient(u.Host, "user/repo", "token")
+	client.SetHTTPClient(mockServer.Client())
+
+	err := client.DeleteManifest(context.Background(), "tag-to-delete")
+	if err != nil {
+		t.Fatalf("DeleteManifest: %v", err)
+	}
+	if !putCalled {
+		t.Error("fallback PUT was not triggered on 401")
+	}
+}
+
 func TestUploadBlobChunked_RetryAndSeek(t *testing.T) {
 	// sha256("test") = 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08
 	const expectedSHA = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"

@@ -400,8 +400,9 @@ func (c *Client) DeleteManifest(ctx context.Context, tag string) error {
 		if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusAccepted || resp.StatusCode == http.StatusNotFound {
 			return nil
 		}
-		// 返回 405 Method Not Allowed，说明注册表禁用了该方法 (如 GHCR)
-		if resp.StatusCode == http.StatusMethodNotAllowed {
+		// 注册表可能禁用 DELETE：405 Method Not Allowed (GHCR),
+		// 或 401/403 令牌无删除权限 (ECR, Harbor 防护策略)
+		if resp.StatusCode == http.StatusMethodNotAllowed || resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusUnauthorized {
 			return c.fallbackUntagManifest(ctx, tag)
 		}
 		return fmt.Errorf("delete manifest failed: HTTP %d", resp.StatusCode)
@@ -715,11 +716,6 @@ func (c *Client) UploadBlobMonolithic(ctx context.Context, filePath, sha256Hex, 
 
 	uploadURL += "?digest=" + digest
 
-	isTTY := term.IsTerminal(int(os.Stderr.Fd()))
-	if isTTY {
-		fmt.Fprintf(os.Stderr, "\r\u001b[K▶ [noci] Uploading %s... %s", description, FormatSize(size))
-	}
-
 	var putResp *http.Response
 	var netTime time.Duration
 	const maxRetries = 3
@@ -735,7 +731,9 @@ func (c *Client) UploadBlobMonolithic(ctx context.Context, filePath, sha256Hex, 
 			token = freshToken
 		}
 
-		putReq, err := http.NewRequestWithContext(ctx, "PUT", uploadURL, file)
+		body := newProgressReader(file, size, description)
+
+		putReq, err := http.NewRequestWithContext(ctx, "PUT", uploadURL, body)
 		if err != nil {
 			return "", 0, fmt.Errorf("failed to create PUT request: %w", err)
 		}
@@ -762,10 +760,6 @@ func (c *Client) UploadBlobMonolithic(ctx context.Context, filePath, sha256Hex, 
 		return "", 0, fmt.Errorf("monolithic upload failed: %w", err)
 	}
 	defer putResp.Body.Close()
-
-	if isTTY {
-		fmt.Fprintln(os.Stderr)
-	}
 
 	if putResp.StatusCode != http.StatusCreated && putResp.StatusCode != http.StatusAccepted {
 		bodyBytes, _ := io.ReadAll(putResp.Body)
@@ -840,6 +834,8 @@ func (c *Client) UploadBlobChunked(ctx context.Context, filePath, sha256Hex, des
 
 	// PATCH loop — upload chunks with Content-Range and per-chunk retry
 	var offset int64
+	totalChunks := (totalSize + chunkSize - 1) / chunkSize
+	var chunkNum int64
 	buf := make([]byte, chunkSize)
 	for offset < totalSize {
 		n, readErr := file.Read(buf)
@@ -927,19 +923,20 @@ func (c *Client) UploadBlobChunked(ctx context.Context, filePath, sha256Hex, des
 
 			offset += int64(n)
 
-			// Progress reporting
+			chunkNum++
+		// Progress reporting
 			pct := float64(offset) * 100 / float64(totalSize)
 			if isTTY {
 				now := time.Now()
 				if lastPrint.IsZero() || offset == totalSize || now.Sub(lastPrint) >= 200*time.Millisecond {
-					fmt.Fprintf(os.Stderr, "\r\x1b[K\u25b6 [noci] Uploading %s... %.1f%% (%s / %s)", description, pct, FormatSize(offset), FormatSize(totalSize))
+					fmt.Fprintf(os.Stderr, "\r\x1b[K\u25b6 [noci] Uploading %s... %.1f%% (%s / %s) [chunk %d/%d]", description, pct, FormatSize(offset), FormatSize(totalSize), chunkNum, totalChunks)
 					lastPrint = now
 				}
 			} else {
 				bucket := int(pct) / 10
 				for bucket > lastBucket {
 					lastBucket++
-					fmt.Fprintf(os.Stderr, "\u25b6 [noci] Uploading %s... %d%% (%s / %s)\n", description, lastBucket*10, FormatSize(offset), FormatSize(totalSize))
+					fmt.Fprintf(os.Stderr, "\u25b6 [noci] Uploading %s... %d%% (%s / %s) [chunk %d/%d]\n", description, lastBucket*10, FormatSize(offset), FormatSize(totalSize), chunkNum, totalChunks)
 				}
 			}
 		}

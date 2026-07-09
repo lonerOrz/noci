@@ -3,6 +3,7 @@ package nix
 import (
 	"crypto/ed25519"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -83,6 +84,17 @@ func NormalizeNarHash(hash string) (string, error) {
 		return "sha256:" + encodeNixBase32(data), nil
 	}
 	return "", fmt.Errorf("unknown hash format: %s", hash)
+}
+
+func HexToNixBase32(hexStr string) (string, error) {
+	data, err := hex.DecodeString(hexStr)
+	if err != nil {
+		return "", fmt.Errorf("hex decode: %w", err)
+	}
+	if len(data) != 32 {
+		return "", fmt.Errorf("invalid sha256 byte length: %d", len(data))
+	}
+	return encodeNixBase32(data), nil
 }
 
 func encodeNixBase32(b []byte) string {

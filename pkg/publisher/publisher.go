@@ -444,7 +444,8 @@ func (p *Publisher) publishSingle(ctx context.Context, info nix.PathInfo) (uploa
 
 	exportDuration := time.Since(exportStart)
 
-	digest, err := p.client.UploadBlobChunked(ctx, tempFile, fileHash, "NAR", 8*1024*1024)
+	digest, uploadSize, err := p.client.UploadBlobMonolithic(ctx, tempFile, fileHash, "NAR")
+	fileSize = uploadSize
 	uploadDuration := time.Since(exportStart)
 
 	if err != nil {
@@ -458,6 +459,9 @@ func (p *Publisher) publishSingle(ctx context.Context, info nix.PathInfo) (uploa
 	}
 
 	fileHash = strings.TrimPrefix(digest, "sha256:")
+	if b32, err := nix.HexToNixBase32(fileHash); err == nil {
+		fileHash = b32
+	}
 
 	normalizedNarHash, err := nix.NormalizeNarHash(info.NarHash)
 	if err != nil {

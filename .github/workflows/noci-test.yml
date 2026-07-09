@@ -39,7 +39,7 @@ jobs:
 
           nix path-info -sh "$ISO_PATH"
 
-          nix run github:lonerOrz/noci#noci -- push "$ISO_PATH" --profile
+          go run . push "$ISO_PATH" --profile
         env:
           NOCI_REGISTRY: ${{ secrets.NOCI_REGISTRY || 'ghcr.io' }}
           NOCI_REPO: ${{ secrets.NOCI_REPO || 'lonerOrz/noci-cache' }}
