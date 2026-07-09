@@ -21,7 +21,7 @@ type PathInfo struct {
 }
 
 func GetPathHash(storePath string) string {
-	base := filepath.Base(storePath)
+	base := filepath.Base(filepath.Clean(storePath))
 	if len(base) < 32 {
 		return ""
 	}

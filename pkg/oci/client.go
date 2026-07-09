@@ -69,6 +69,10 @@ func NewClient(registry, repo, token string) *Client {
 	}
 }
 
+func (c *Client) SetHTTPClient(hc *http.Client) {
+	c.client = hc
+}
+
 func (c *Client) getOciToken(ctx context.Context, actions string) (string, error) {
 	c.tokenMu.Lock()
 	defer c.tokenMu.Unlock()

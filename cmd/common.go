@@ -229,7 +229,6 @@ func resolveHashes(ctx context.Context, args []string, allowBuild bool) ([]strin
 		}
 
 		// 策略 A: 原生 32 位 Nix 哈希格式
-		arg = filepath.Clean(arg)
 		lowerArg := strings.ToLower(arg)
 		if nixHashRegex.MatchString(lowerArg) {
 			hashes = append(hashes, lowerArg)
