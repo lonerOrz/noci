@@ -209,6 +209,17 @@ func TestBasePackageName(t *testing.T) {
 		{"libfoo", "libfoo"},
 		{"nix-2.18.1", "nix"},
 		{"zlib-1.2.13", "zlib"},
+		// Edge cases: names starting with digits
+		{"3proxy-0.9.8", "3proxy"},
+		{"python3.11-numpy-1.26.4", "python3.11-numpy"},
+		{"lib32-glibc-2.38", "lib32-glibc"},
+		{"gcc-13.2.0-lib", "gcc"},
+		// Short numeric versions (fallback path)
+		{"gcc-13-lib", "gcc"},
+		{"python3-3", "python3"},
+		// No version at all
+		{"3proxy", "3proxy"},
+		{"schannel-20231003", "schannel"},
 	}
 	for _, tt := range tests {
 		got := basePackageName(tt.input)

@@ -218,24 +218,23 @@ func readDockerConfigToken(registry string) string {
 	return parts[1]
 }
 
-// 统一解析输入
+// resolveHashes resolves input arguments to 32-char Nix hashes.
 func resolveHashes(ctx context.Context, args []string, allowBuild bool) ([]string, error) {
 	var hashes []string
 	for _, arg := range args {
-		// 仅去除两端空格
 		arg = strings.TrimSpace(arg)
 		if arg == "" {
 			continue
 		}
 
-		// 策略 A: 原生 32 位 Nix 哈希格式
+		// Raw 32-char Nix hash.
 		lowerArg := strings.ToLower(arg)
 		if nixHashRegex.MatchString(lowerArg) {
 			hashes = append(hashes, lowerArg)
 			continue
 		}
 
-		// 策略 B: Nix Store 绝对路径形式
+		// Nix store path.
 		if strings.HasPrefix(arg, "/nix/store") {
 			hash := nix.GetPathHash(arg)
 			if hash != "" {
@@ -244,7 +243,7 @@ func resolveHashes(ctx context.Context, args []string, allowBuild bool) ([]strin
 			continue
 		}
 
-		// 策略 C: nix build（允许时）或 nix eval --raw（不允许时）
+		// Flake target: build or eval.
 		if allowBuild {
 			log.Action("Target %q is not a local store path or raw hash. Evaluating via `nix build`...", arg)
 			buildPaths, err := nix.BuildTarget(ctx, arg)
@@ -296,7 +295,7 @@ func parseTTL(ttl string) (int64, error) {
 	return int64(dur.Seconds()), nil
 }
 
-// parseSizeString 解析人类易读的大小限制字符串为字节数
+// parseSizeString parses a human-readable size string to bytes.
 func parseSizeString(sizeStr string) (int64, error) {
 	sizeStr = strings.ToUpper(strings.TrimSpace(sizeStr))
 	if sizeStr == "" {

@@ -43,7 +43,7 @@ func runPin(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("invalid --ttl value: %w", err)
 	}
 
-	// 统一利用 resolveHashes 解析（策略上允许降级调用本地 `nix build` 获取新构建的 hash）
+	// Resolve inputs: allow nix build fallback.
 	inputHashes, err := resolveHashes(ctx, args, true)
 	if err != nil {
 		return err

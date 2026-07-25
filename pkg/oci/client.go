@@ -73,6 +73,65 @@ func (c *Client) SetHTTPClient(hc *http.Client) {
 	c.client = hc
 }
 
+// ProgressNotifier reports upload progress.
+type ProgressNotifier interface {
+	Update(description string, offset, total int64)
+	Finish()
+}
+
+// StderrProgressNotifier writes progress to stderr with TTY-aware formatting.
+type StderrProgressNotifier struct {
+	isTTY      bool
+	lastPrint  time.Time
+	lastBucket int
+	finished   bool
+}
+
+func NewStderrProgressNotifier() *StderrProgressNotifier {
+	return &StderrProgressNotifier{
+		isTTY:      term.IsTerminal(int(os.Stderr.Fd())),
+		lastBucket: -1,
+	}
+}
+
+func (n *StderrProgressNotifier) Update(description string, offset, total int64) {
+	if total <= 0 {
+		return
+	}
+	pct := float64(offset) * 100 / float64(total)
+	if n.isTTY {
+		now := time.Now()
+		if n.lastPrint.IsZero() || offset == total || now.Sub(n.lastPrint) >= 200*time.Millisecond {
+			fmt.Fprintf(os.Stderr, "\r\x1b[K▶ [noci] Uploading %s... %.1f%% (%s / %s)", description, pct, FormatSize(offset), FormatSize(total))
+			n.lastPrint = now
+		}
+	} else {
+		bucket := int(pct) / 10
+		for bucket > n.lastBucket {
+			n.lastBucket++
+			fmt.Fprintf(os.Stderr, "▶ [noci] Uploading %s... %d%% (%s / %s)\n", description, n.lastBucket*10, FormatSize(offset), FormatSize(total))
+		}
+	}
+}
+
+func (n *StderrProgressNotifier) Finish() {
+	if n.finished {
+		return
+	}
+	n.finished = true
+	if n.isTTY {
+		fmt.Fprintln(os.Stderr)
+	}
+}
+
+// NoopProgressNotifier discards all progress updates.
+type NoopProgressNotifier struct{}
+
+func (n *NoopProgressNotifier) Update(string, int64, int64) {}
+func (n *NoopProgressNotifier) Finish()                      {}
+
+const chunkedThreshold = 64 * 1024 * 1024 // 64MB
+
 func (c *Client) getOciToken(ctx context.Context, actions string) (string, error) {
 	c.tokenMu.Lock()
 	defer c.tokenMu.Unlock()
@@ -391,17 +450,16 @@ func parseNextLink(link string) string {
 	return ""
 }
 
-// DeleteManifest 策略分流式物理删除
+// DeleteManifest performs strategy-based physical deletion.
 func (c *Client) DeleteManifest(ctx context.Context, tag string) error {
-	// 尝试符合标准 OCI 协议的 DELETE 请求 (Harbor, GitLab, ECR 支持)
 	resp, err := c.Request(ctx, "DELETE", "/manifests/"+tag, nil, "")
 	if err == nil {
 		defer resp.Body.Close()
 		if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusAccepted || resp.StatusCode == http.StatusNotFound {
 			return nil
 		}
-		// 注册表可能禁用 DELETE：405 Method Not Allowed (GHCR),
-		// 或 401/403 令牌无删除权限 (ECR, Harbor 防护策略)
+		// Registry may disable DELETE: 405 Method Not Allowed (GHCR),
+		// or 401/403 token lacks delete permission (ECR, Harbor)
 		if resp.StatusCode == http.StatusMethodNotAllowed || resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusUnauthorized {
 			return c.fallbackUntagManifest(ctx, tag)
 		}
@@ -410,14 +468,14 @@ func (c *Client) DeleteManifest(ctx context.Context, tag string) error {
 	return err
 }
 
-// 重置/覆盖 Tag 指针，达到 logical untagged 物理垃圾悬空
+// fallbackUntagManifest overwrites the tag pointer, making the original manifest untagged.
 func (c *Client) fallbackUntagManifest(ctx context.Context, tag string) error {
 	if c.Profile {
 		log.Info("[profile] OCI DELETE blocked (405). Falling back to tag-overwriting (untagging) for tag: %s", tag)
 	}
 
-	// 向原有的 Nix 32位 哈希标签推送一个极小的 Dummy 空清单
-	// 这会立即解绑原先的 NAR Manifest，使其退化为 "untagged" (悬空无标签) 状态。
+	// Push a tiny dummy empty manifest to the original tag,
+	// immediately unbinding the NAR Manifest and leaving it untagged.
 	dummyManifest := OCIManifest{
 		SchemaVersion: 2,
 		MediaType:     "application/vnd.oci.image.manifest.v1+json",
@@ -515,7 +573,7 @@ func (c *Client) PushIndex(ctx context.Context, idx *CacheIndex) error {
 
 	log.Action("Uploading index...")
 
-	digest, err := c.UploadBlob(ctx, tmp.Name(), hex.EncodeToString(h.Sum(nil)), "index")
+	digest, _, err := c.UploadBlob(ctx, tmp.Name(), hex.EncodeToString(h.Sum(nil)), "index", nil)
 	if err != nil {
 		return err
 	}
@@ -549,111 +607,11 @@ func (c *Client) PushIndex(ctx context.Context, idx *CacheIndex) error {
 	return nil
 }
 
-func (c *Client) UploadBlob(ctx context.Context, filePath, sha256Hex, description string) (string, error) {
-	digest := "sha256:" + sha256Hex
-
-	headResp, err := c.Request(ctx, "HEAD", "/blobs/"+digest, nil, "")
-	if err == nil && headResp.StatusCode == http.StatusOK {
-		return digest, nil
+// UploadBlob uploads a blob, auto-selecting monolithic or chunked strategy.
+func (c *Client) UploadBlob(ctx context.Context, filePath, sha256Hex, description string, notifier ProgressNotifier) (digest string, size int64, err error) {
+	if notifier == nil {
+		notifier = &NoopProgressNotifier{}
 	}
-
-	initResp, err := c.Request(ctx, "POST", "/blobs/uploads/", nil, "")
-	if err != nil {
-		return "", err
-	}
-	defer initResp.Body.Close()
-
-	if initResp.StatusCode != http.StatusAccepted && initResp.StatusCode != http.StatusCreated {
-		bodyBytes, _ := io.ReadAll(initResp.Body)
-		return "", fmt.Errorf("failed to initiate blob upload (HTTP %d): %s", initResp.StatusCode, string(bodyBytes))
-	}
-
-	uploadURL := initResp.Header.Get("Location")
-	if uploadURL == "" {
-		return "", fmt.Errorf("registry didn't return upload location")
-	}
-
-	u, err := url.Parse(uploadURL)
-	if err != nil {
-		return "", fmt.Errorf("invalid upload location URL: %w", err)
-	}
-
-	if !u.IsAbs() {
-		base, _ := url.Parse(fmt.Sprintf("https://%s", c.registry))
-		u = base.ResolveReference(u)
-	}
-
-	q := u.Query()
-	q.Set("digest", digest)
-	u.RawQuery = q.Encode()
-	uploadURL = u.String()
-
-	file, err := os.Open(filePath)
-	if err != nil {
-		return "", err
-	}
-	defer file.Close()
-
-	stat, _ := file.Stat()
-
-	pr := newProgressReader(file, stat.Size(), description)
-	token, _ := c.getOciToken(ctx, "pull,push")
-
-	var putResp *http.Response
-	const maxRetries = 3
-	backoff := time.Second
-	for attempt := 0; attempt <= maxRetries; attempt++ {
-		// Re-open file for retry (io.Reader consumed on first attempt)
-		if attempt > 0 {
-			file.Seek(0, io.SeekStart)
-			pr = newProgressReader(file, stat.Size(), description)
-			freshToken, tokenErr := c.getOciToken(ctx, "pull,push")
-			if tokenErr != nil {
-				fmt.Println()
-				return "", fmt.Errorf("refresh token for upload PUT: %w", tokenErr)
-			}
-			token = freshToken
-		}
-
-		req, err := http.NewRequestWithContext(ctx, "PUT", uploadURL, pr)
-		if err != nil {
-			fmt.Println()
-			return "", err
-		}
-		req.Header.Set("Authorization", "Bearer "+token)
-		req.Header.Set("Content-Type", "application/octet-stream")
-		req.ContentLength = stat.Size()
-
-		putResp, err = c.client.Do(req)
-		if err == nil && putResp.StatusCode < 500 {
-			break
-		}
-		if putResp != nil {
-			putResp.Body.Close()
-		}
-		if attempt < maxRetries {
-			time.Sleep(backoff)
-			backoff *= 2
-		}
-	}
-	if err != nil {
-		fmt.Println()
-		return "", err
-	}
-	defer putResp.Body.Close()
-
-	if putResp.StatusCode != http.StatusCreated && putResp.StatusCode != http.StatusAccepted {
-		fmt.Println()
-		bodyBytes, _ := io.ReadAll(putResp.Body)
-		return "", fmt.Errorf("failed to complete upload: HTTP %d, %s", putResp.StatusCode, string(bodyBytes))
-	}
-
-	fmt.Printf("\r\x1b[K✔ [noci] Uploaded %s (%s).\n", description, FormatSize(stat.Size()))
-	return digest, nil
-}
-
-func (c *Client) UploadBlobMonolithic(ctx context.Context, filePath, sha256Hex, description string) (digest string, size int64, err error) {
-	uploadStart := time.Now()
 
 	digest = "sha256:" + sha256Hex
 
@@ -682,6 +640,29 @@ func (c *Client) UploadBlobMonolithic(ctx context.Context, filePath, sha256Hex, 
 	} else if headResp != nil {
 		headResp.Body.Close()
 	}
+
+	if size > chunkedThreshold {
+		return c.uploadBlobChunked(ctx, filePath, sha256Hex, description, notifier)
+	}
+	return c.uploadBlobMonolithic(ctx, filePath, sha256Hex, description, notifier)
+}
+
+func (c *Client) uploadBlobMonolithic(ctx context.Context, filePath, sha256Hex, description string, notifier ProgressNotifier) (digest string, size int64, err error) {
+	uploadStart := time.Now()
+
+	digest = "sha256:" + sha256Hex
+
+	file, err := os.Open(filePath)
+	if err != nil {
+		return "", 0, fmt.Errorf("failed to open blob file: %w", err)
+	}
+	defer file.Close()
+
+	stat, err := file.Stat()
+	if err != nil {
+		return "", 0, fmt.Errorf("failed to stat blob file: %w", err)
+	}
+	size = stat.Size()
 
 	token, err := c.getOciToken(ctx, "pull,push")
 	if err != nil {
@@ -731,7 +712,7 @@ func (c *Client) UploadBlobMonolithic(ctx context.Context, filePath, sha256Hex, 
 			token = freshToken
 		}
 
-		body := newProgressReader(file, size, description)
+		body := file
 
 		putReq, err := http.NewRequestWithContext(ctx, "PUT", uploadURL, body)
 		if err != nil {
@@ -766,6 +747,9 @@ func (c *Client) UploadBlobMonolithic(ctx context.Context, filePath, sha256Hex, 
 		return "", 0, fmt.Errorf("monolithic upload failed: HTTP %d, %s", putResp.StatusCode, string(bodyBytes))
 	}
 
+	notifier.Update(description, size, size)
+	notifier.Finish()
+
 	if c.Profile {
 		totalElapsed := time.Since(uploadStart)
 		log.Info("[profile] Upload %s: total=%v net=%v (net %.1f%%) size=%s",
@@ -777,39 +761,28 @@ func (c *Client) UploadBlobMonolithic(ctx context.Context, filePath, sha256Hex, 
 	return digest, size, nil
 }
 
-func (c *Client) UploadBlobChunked(ctx context.Context, filePath, sha256Hex, description string, chunkSize int64) (string, error) {
-	digest := "sha256:" + sha256Hex
+func (c *Client) uploadBlobChunked(ctx context.Context, filePath, sha256Hex, description string, notifier ProgressNotifier) (digest string, size int64, err error) {
+	digest = "sha256:" + sha256Hex
 
-	// HEAD check — skip upload if blob already exists
-	headResp, err := c.Request(ctx, "HEAD", "/blobs/"+digest, nil, "")
-	if err == nil && headResp.StatusCode == http.StatusOK {
-		headResp.Body.Close()
-		return digest, nil
-	}
-	if headResp != nil {
-		headResp.Body.Close()
-	}
-
-	// POST to initiate chunked upload session
 	initResp, err := c.Request(ctx, "POST", "/blobs/uploads/", nil, "")
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 	defer initResp.Body.Close()
 
 	if initResp.StatusCode != http.StatusAccepted && initResp.StatusCode != http.StatusCreated {
 		bodyBytes, _ := io.ReadAll(initResp.Body)
-		return "", fmt.Errorf("failed to initiate chunked upload (HTTP %d): %s", initResp.StatusCode, string(bodyBytes))
+		return "", 0, fmt.Errorf("failed to initiate chunked upload (HTTP %d): %s", initResp.StatusCode, string(bodyBytes))
 	}
 
 	location := initResp.Header.Get("Location")
 	if location == "" {
-		return "", fmt.Errorf("registry didn't return upload location")
+		return "", 0, fmt.Errorf("registry didn't return upload location")
 	}
 
 	u, err := url.Parse(location)
 	if err != nil {
-		return "", fmt.Errorf("invalid upload location URL: %w", err)
+		return "", 0, fmt.Errorf("invalid upload location URL: %w", err)
 	}
 	if !u.IsAbs() {
 		base, _ := url.Parse(fmt.Sprintf("https://%s", c.registry))
@@ -818,30 +791,24 @@ func (c *Client) UploadBlobChunked(ctx context.Context, filePath, sha256Hex, des
 
 	file, err := os.Open(filePath)
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 	defer file.Close()
 
 	stat, err := file.Stat()
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
-	totalSize := stat.Size()
+	size = stat.Size()
 
-	isTTY := term.IsTerminal(int(os.Stderr.Fd()))
-	lastPrint := time.Time{}
-	lastBucket := -1
-
-	// PATCH loop — upload chunks with Content-Range and per-chunk retry
 	var offset int64
-	totalChunks := (totalSize + chunkSize - 1) / chunkSize
-	var chunkNum int64
+	const chunkSize = 32 * 1024 * 1024
 	buf := make([]byte, chunkSize)
-	for offset < totalSize {
+	for offset < size {
 		n, readErr := file.Read(buf)
 		if n > 0 {
 			chunkStart := offset
-			chunkEnd := offset + int64(n) - 1 // OCI closed interval
+			chunkEnd := offset + int64(n) - 1
 
 			var resp *http.Response
 			const maxRetries = 3
@@ -851,29 +818,27 @@ func (c *Client) UploadBlobChunked(ctx context.Context, filePath, sha256Hex, des
 			for attempt := 0; attempt <= maxRetries; attempt++ {
 				select {
 				case <-ctx.Done():
-					return "", ctx.Err()
+					return "", 0, ctx.Err()
 				default:
 				}
 
-				// On retry, seek back and re-read the chunk
 				if attempt > 0 {
 					if _, seekErr := file.Seek(chunkStart, io.SeekStart); seekErr != nil {
-						return "", fmt.Errorf("seek for chunk retry: %w", seekErr)
+						return "", 0, fmt.Errorf("seek for chunk retry: %w", seekErr)
 					}
 					if _, rErr := io.ReadFull(file, buf[:n]); rErr != nil {
-						return "", fmt.Errorf("re-read chunk: %w", rErr)
+						return "", 0, fmt.Errorf("re-read chunk: %w", rErr)
 					}
 				}
 
 				freshToken, tokenErr := c.getOciToken(ctx, "pull,push")
 				if tokenErr != nil {
-					return "", fmt.Errorf("get token: %w", tokenErr)
+					return "", 0, fmt.Errorf("get token: %w", tokenErr)
 				}
 
-				// Use Location URL as-is — never manipulate query params (registry session tokens are sacred)
 				req, err := http.NewRequestWithContext(ctx, "PATCH", u.String(), bytes.NewReader(buf[:n]))
 				if err != nil {
-					return "", err
+					return "", 0, err
 				}
 				req.Header.Set("Authorization", "Bearer "+freshToken)
 				req.Header.Set("Content-Type", "application/octet-stream")
@@ -890,7 +855,7 @@ func (c *Client) UploadBlobChunked(ctx context.Context, filePath, sha256Hex, des
 					if resp.StatusCode < 500 {
 						bodyBytes, _ := io.ReadAll(resp.Body)
 						resp.Body.Close()
-						return "", fmt.Errorf("PATCH failed at offset %d: HTTP %d, %s", chunkStart, resp.StatusCode, string(bodyBytes))
+						return "", 0, fmt.Errorf("PATCH failed at offset %d: HTTP %d, %s", chunkStart, resp.StatusCode, string(bodyBytes))
 					}
 					resp.Body.Close()
 					patchErr = fmt.Errorf("server error HTTP %d at offset %d", resp.StatusCode, chunkStart)
@@ -904,10 +869,9 @@ func (c *Client) UploadBlobChunked(ctx context.Context, filePath, sha256Hex, des
 				}
 			}
 			if patchErr != nil {
-				return "", fmt.Errorf("PATCH failed after retries: %w", patchErr)
+				return "", 0, fmt.Errorf("PATCH failed after retries: %w", patchErr)
 			}
 
-			// Update Location from response — trust the registry's next URL verbatim
 			newLoc := resp.Header.Get("Location")
 			resp.Body.Close()
 			if newLoc != "" {
@@ -922,37 +886,19 @@ func (c *Client) UploadBlobChunked(ctx context.Context, filePath, sha256Hex, des
 			}
 
 			offset += int64(n)
-
-			chunkNum++
-		// Progress reporting
-			pct := float64(offset) * 100 / float64(totalSize)
-			if isTTY {
-				now := time.Now()
-				if lastPrint.IsZero() || offset == totalSize || now.Sub(lastPrint) >= 200*time.Millisecond {
-					fmt.Fprintf(os.Stderr, "\r\x1b[K\u25b6 [noci] Uploading %s... %.1f%% (%s / %s) [chunk %d/%d]", description, pct, FormatSize(offset), FormatSize(totalSize), chunkNum, totalChunks)
-					lastPrint = now
-				}
-			} else {
-				bucket := int(pct) / 10
-				for bucket > lastBucket {
-					lastBucket++
-					fmt.Fprintf(os.Stderr, "\u25b6 [noci] Uploading %s... %d%% (%s / %s) [chunk %d/%d]\n", description, lastBucket*10, FormatSize(offset), FormatSize(totalSize), chunkNum, totalChunks)
-				}
-			}
+			notifier.Update(description, offset, size)
 		}
 		if readErr != nil {
 			if readErr != io.EOF {
-				return "", readErr
+				return "", 0, readErr
 			}
 			break
 		}
 	}
 
-	if isTTY {
-		fmt.Fprintln(os.Stderr)
-	}
+	notifier.Finish()
 
-	// Final PUT — commit the upload with digest, retry with fresh token
+	// Final PUT: commit the upload with digest.
 	finalURL := u.String()
 	if strings.Contains(finalURL, "?") {
 		finalURL += "&digest=" + digest
@@ -966,18 +912,18 @@ func (c *Client) UploadBlobChunked(ctx context.Context, filePath, sha256Hex, des
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		select {
 		case <-ctx.Done():
-			return "", ctx.Err()
+			return "", 0, ctx.Err()
 		default:
 		}
 
 		freshToken, tokenErr := c.getOciToken(ctx, "pull,push")
 		if tokenErr != nil {
-			return "", fmt.Errorf("refresh token for final PUT: %w", tokenErr)
+			return "", 0, fmt.Errorf("refresh token for final PUT: %w", tokenErr)
 		}
 
 		putReq, err := http.NewRequestWithContext(ctx, "PUT", finalURL, nil)
 		if err != nil {
-			return "", err
+			return "", 0, err
 		}
 		putReq.Header.Set("Authorization", "Bearer "+freshToken)
 		putReq.Header.Set("Content-Type", "application/octet-stream")
@@ -996,16 +942,16 @@ func (c *Client) UploadBlobChunked(ctx context.Context, filePath, sha256Hex, des
 		}
 	}
 	if err != nil {
-		return "", fmt.Errorf("final PUT failed: %w", err)
+		return "", 0, fmt.Errorf("final PUT failed: %w", err)
 	}
 	defer putResp.Body.Close()
 
 	if putResp.StatusCode != http.StatusCreated && putResp.StatusCode != http.StatusAccepted && putResp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(putResp.Body)
-		return "", fmt.Errorf("final PUT failed: HTTP %d, %s", putResp.StatusCode, string(bodyBytes))
+		return "", 0, fmt.Errorf("final PUT failed: HTTP %d, %s", putResp.StatusCode, string(bodyBytes))
 	}
 
-	return digest, nil
+	return digest, size, nil
 }
 
 func (c *Client) downloadBlob(ctx context.Context, digest string) ([]byte, error) {
@@ -1032,60 +978,6 @@ func (c *Client) DeleteBlob(ctx context.Context, digest string) error {
 		return fmt.Errorf("failed to delete blob %s (HTTP %d): %s", digest, resp.StatusCode, string(bodyBytes))
 	}
 	return nil
-}
-
-type progressReader struct {
-	r           io.Reader
-	total       int64
-	done        int64
-	description string
-	isTTY       bool
-	lastPrint   time.Time
-	lastBucket  int
-	cursorReset bool // 防止高频调用时发生多重 Terminal 回车
-}
-
-// 针对 os.Stderr 检测 TTY 属性，因为进度 UI 条作为诊断状态信息应当输出到标准错误流（Stderr）
-func newProgressReader(r io.Reader, total int64, description string) *progressReader {
-	isTTY := term.IsTerminal(int(os.Stderr.Fd()))
-	return &progressReader{
-		r:           r,
-		total:       total,
-		description: description,
-		isTTY:       isTTY,
-		lastBucket:  -1, // 初始化为 -1 确保 0% 桶在起始被触发时能够正常输出
-	}
-}
-
-func (pr *progressReader) Read(p []byte) (int, error) {
-	n, err := pr.r.Read(p)
-	pr.done += int64(n)
-	if pr.total > 0 {
-		pct := float64(pr.done) * 100 / float64(pr.total)
-
-		if pr.isTTY {
-			// 物理 TTY 终端环境，采用 200ms 高频刷屏覆盖，并将 UI 信息安全重定向输出至 Stderr
-			now := time.Now()
-			if pr.lastPrint.IsZero() || pr.done == pr.total || err != nil || now.Sub(pr.lastPrint) >= 200*time.Millisecond {
-				fmt.Fprintf(os.Stderr, "\r\x1b[K▶ [noci] Uploading %s... %.1f%% (%s / %s)", pr.description, pct, FormatSize(pr.done), FormatSize(pr.total))
-				pr.lastPrint = now
-			}
-
-			// 上传彻底结束时，向 Stderr 补打一个回车换行
-			if pr.done == pr.total && !pr.cursorReset {
-				fmt.Fprintln(os.Stderr)
-				pr.cursorReset = true
-			}
-		} else {
-			// 非 TTY 终端（CI 管道、重定向、管道、tee），采用滑动桶（for 步长递增）补齐方案
-			bucket := int(pct) / 10
-			for bucket > pr.lastBucket {
-				pr.lastBucket++
-				fmt.Fprintf(os.Stderr, "▶ [noci] Uploading %s... %d%% (%s / %s)\n", pr.description, pr.lastBucket*10, FormatSize(pr.done), FormatSize(pr.total))
-			}
-		}
-	}
-	return n, err
 }
 
 func FormatSize(b int64) string {

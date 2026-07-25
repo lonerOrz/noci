@@ -10,7 +10,6 @@ import (
 	"noci/pkg/publisher"
 	"os"
 	"strings"
-	"sync"
 
 	"github.com/spf13/cobra"
 )
@@ -132,49 +131,14 @@ func runPush(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	if len(entries) == 1 {
-		client := oci.NewClient(entries[0].Registry, entries[0].Repo, entries[0].Token)
+	clients := make([]*oci.Client, 0, len(entries))
+	for _, e := range entries {
+		client := oci.NewClient(e.Registry, e.Repo, e.Token)
 		client.Profile = pushProfile
-		pub := publisher.NewPublisher(client, signer, pushSkipUpstream, comp, pushCompressionLevel, pushJobs, nil)
-		pub.Profile = pushProfile
-		return pub.Publish(ctx, inputPaths)
+		clients = append(clients, client)
 	}
 
-	// Multi-registry: fan out in parallel with shared export cache
-	log.Info("Pushing to %d registries...", len(entries))
-	cache := publisher.NewExportCache()
-	defer cache.Cleanup()
-
-	var wg sync.WaitGroup
-	errCh := make(chan error, len(entries))
-	for _, entry := range entries {
-		wg.Add(1)
-		go func(e RegistryEntry) {
-			defer wg.Done()
-			client := oci.NewClient(e.Registry, e.Repo, e.Token)
-			client.Profile = pushProfile
-			pub := publisher.NewPublisher(client, signer, pushSkipUpstream, comp, pushCompressionLevel, pushJobs, cache)
-			pub.Profile = pushProfile
-			if err := pub.Publish(ctx, inputPaths); err != nil {
-				log.Warning("Push to %s/%s failed: %v", e.Registry, e.Repo, err)
-				errCh <- fmt.Errorf("%s/%s: %w", e.Registry, e.Repo, err)
-			} else {
-				log.Success("Push to %s/%s completed.", e.Registry, e.Repo)
-			}
-		}(entry)
-	}
-	wg.Wait()
-	close(errCh)
-
-	var errs []error
-	for e := range errCh {
-		errs = append(errs, e)
-	}
-	if len(errs) == len(entries) {
-		return fmt.Errorf("all registries failed: %v", errs)
-	}
-	if len(errs) > 0 {
-		log.Warning("%d registries failed, %d succeeded.", len(errs), len(entries)-len(errs))
-	}
-	return nil
+	pub := publisher.NewPublisher(clients, signer, pushSkipUpstream, comp, pushCompressionLevel, pushJobs)
+	pub.Profile = pushProfile
+	return pub.Publish(ctx, inputPaths)
 }

@@ -112,17 +112,25 @@ async function prepareBinary() {
   const repo = process.env.GITHUB_ACTION_REPOSITORY || "lonerOrz/noci";
   const platform = os.platform();
   const arch = os.arch() === "x64" ? "amd64" : "arm64";
+  const binaryName = `noci-${platform}-${arch}`;
 
   if (version) {
-    const releaseUrl = `https://github.com/${repo}/releases/download/${version}/noci-${platform}-${arch}`;
+    const tag = version.startsWith("v") ? version : `v${version}`;
+    const releaseUrl = `https://github.com/${repo}/releases/download/${tag}/${binaryName}`;
     try {
       await downloadFile(releaseUrl, target);
       return target;
     } catch (err) {
-      console.log(`[noci-action] Binary download failed, building locally...`);
+      console.log(`[noci-action] Download ${tag} failed, trying latest release...`);
     }
-  } else {
-    console.log(`[noci-action] GITHUB_ACTION_REF is empty, building locally...`);
+  }
+
+  const latestUrl = `https://github.com/${repo}/releases/latest/download/${binaryName}`;
+  try {
+    await downloadFile(latestUrl, target);
+    return target;
+  } catch (err) {
+    console.log(`[noci-action] Latest release download failed, building locally...`);
   }
 
   const outLink = "/tmp/noci-result";

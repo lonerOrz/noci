@@ -32,7 +32,7 @@ func runUnpin(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// 统一利用 resolveHashes 解析（策略上强制禁止 unpin 触发本地构建，提升效率）
+	// Resolve inputs: no nix build fallback.
 	inputHashes, err := resolveHashes(ctx, args, false)
 	if err != nil {
 		return err

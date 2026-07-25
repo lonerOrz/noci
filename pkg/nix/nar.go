@@ -17,9 +17,7 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
-// ExportAndCompress 流式将 nix-store 导出并动态选择压缩算法 (Context-Aware)
-// concurrency: zstd 编码器线程数，<=0 时自动设为 min(4, max(1, NumCPU/2))
-// level: zstd 压缩等级 (1-19)，<=0 时默认 3
+// ExportAndCompress exports a store path and compresses it as a NAR archive.
 func ExportAndCompress(ctx context.Context, storePath string, comp string, concurrency int, level int) (tempFile string, fileHash string, fileSize int64, err error) {
 	ext := ".nar.gz"
 	if comp == "zstd" {

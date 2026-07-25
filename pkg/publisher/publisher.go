@@ -28,9 +28,7 @@ type cacheProgress struct {
 	err   error
 }
 
-// ExportCache ensures nix.ExportAndCompress runs at most once per store path
-// across all registries. Concurrent callers for the same path block until the
-// first export completes, then share the result.
+// ExportCache ensures ExportAndCompress runs at most once per store path across registries.
 type ExportCache struct {
 	mu    sync.Mutex
 	paths map[string]*cacheProgress
@@ -88,7 +86,7 @@ func (c *ExportCache) Cleanup() {
 }
 
 type Publisher struct {
-	client       *oci.Client
+	clients      []*oci.Client
 	signer       *nix.Signer
 	skipUpstream bool
 	comp         string
@@ -98,18 +96,21 @@ type Publisher struct {
 	cache        *ExportCache
 }
 
-func NewPublisher(client *oci.Client, signer *nix.Signer, skipUpstream bool, comp string, compLevel int, jobs int, cache *ExportCache) *Publisher {
-	if client == nil || signer == nil {
-		panic("publisher: client and signer must not be nil")
+func NewPublisher(clients []*oci.Client, signer *nix.Signer, skipUpstream bool, comp string, compLevel int, jobs int) *Publisher {
+	if len(clients) == 0 {
+		panic("publisher: at least one client required")
+	}
+	if signer == nil {
+		panic("publisher: signer must not be nil")
 	}
 	return &Publisher{
-		client:       client,
+		clients:      clients,
 		signer:       signer,
 		skipUpstream: skipUpstream,
 		comp:         comp,
 		compLevel:    compLevel,
 		jobs:         jobs,
-		cache:        cache,
+		cache:        NewExportCache(),
 	}
 }
 
@@ -122,7 +123,50 @@ type uploadResult struct {
 	refs    []string
 }
 
+// Publish runs the full publish pipeline across all registries.
+// Cleans up the ExportCache when done.
 func (p *Publisher) Publish(ctx context.Context, inputPaths []string) error {
+	defer p.cache.Cleanup()
+
+	if len(p.clients) == 1 {
+		return p.publishToRegistry(ctx, p.clients[0], inputPaths)
+	}
+
+	log.Info("Pushing to %d registries...", len(p.clients))
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, len(p.clients))
+
+	for _, client := range p.clients {
+		wg.Add(1)
+		go func(c *oci.Client) {
+			defer wg.Done()
+			if err := p.publishToRegistry(ctx, c, inputPaths); err != nil {
+				log.Warning("Push to registry failed: %v", err)
+				errCh <- err
+			} else {
+				log.Success("Push to registry completed.")
+			}
+		}(client)
+	}
+
+	wg.Wait()
+	close(errCh)
+
+	var errs []error
+	for e := range errCh {
+		errs = append(errs, e)
+	}
+	if len(errs) == len(p.clients) {
+		return fmt.Errorf("all registries failed: %v", errs)
+	}
+	if len(errs) > 0 {
+		log.Warning("%d registries failed, %d succeeded.", len(errs), len(p.clients)-len(errs))
+	}
+	return nil
+}
+
+func (p *Publisher) publishToRegistry(ctx context.Context, client *oci.Client, inputPaths []string) error {
 	totalStart := time.Now()
 	var t0, t1, t2, t3, t4, t5, t6 time.Time
 
@@ -146,11 +190,11 @@ func (p *Publisher) Publish(ctx context.Context, inputPaths []string) error {
 				"org.nix.public_key": publicKeyStr,
 			},
 		}
-		_ = p.client.PushManifest(ctx, "public-key", &pubManifest)
+		_ = client.PushManifest(ctx, "public-key", &pubManifest)
 	}
 
 	t1 = time.Now()
-	index, err := p.client.FetchIndex(ctx)
+	index, err := client.FetchIndex(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to load index: %w", err)
 	}
@@ -194,7 +238,7 @@ func (p *Publisher) Publish(ctx context.Context, inputPaths []string) error {
 				<-checkSem
 				checkWg.Done()
 			}()
-			exists, _ := p.client.ManifestExists(ctx, hash)
+			exists, _ := client.ManifestExists(ctx, hash)
 			resultChan <- checkResult{hash: hash, path: path, exists: exists}
 		}(m.path, m.hash)
 	}
@@ -205,7 +249,7 @@ func (p *Publisher) Publish(ctx context.Context, inputPaths []string) error {
 	var repairCount int
 	for res := range resultChan {
 		if res.exists {
-			if err := p.client.RepairIndexEntry(ctx, res.hash, index); err != nil {
+			if err := client.RepairIndexEntry(ctx, res.hash, index); err != nil {
 				log.Warning("Failed to repair index entry for %s: %v", res.hash, err)
 				uncachedPaths = append(uncachedPaths, res.path)
 			} else {
@@ -217,7 +261,7 @@ func (p *Publisher) Publish(ctx context.Context, inputPaths []string) error {
 	}
 
 	if repairCount > 0 {
-		if err := p.client.PushIndex(ctx, index); err != nil {
+		if err := client.PushIndex(ctx, index); err != nil {
 			return fmt.Errorf("failed to push repaired index: %w", err)
 		}
 		log.Success("Repaired %d stale index entries.", repairCount)
@@ -325,7 +369,7 @@ func (p *Publisher) Publish(ctx context.Context, inputPaths []string) error {
 				wg.Done()
 			}()
 
-			res, err := p.publishSingle(pipelineCtx, pathInfo)
+			res, err := p.publishSingle(pipelineCtx, client, pathInfo)
 			if err != nil {
 				errMu.Lock()
 				if firstErr == nil {
@@ -361,7 +405,7 @@ func (p *Publisher) Publish(ctx context.Context, inputPaths []string) error {
 					"org.nix.references": strings.Join(res.refs, ","),
 				},
 			}
-			if err := p.client.PushManifest(pipelineCtx, res.hash, &manifest); err != nil {
+			if err := client.PushManifest(pipelineCtx, res.hash, &manifest); err != nil {
 				errMu.Lock()
 				if firstErr == nil {
 					firstErr = fmt.Errorf("push manifest %s failed: %w", res.hash, err)
@@ -384,7 +428,7 @@ func (p *Publisher) Publish(ctx context.Context, inputPaths []string) error {
 	}
 
 	t6 = time.Now()
-	freshIndex, err := p.client.FetchIndex(ctx)
+	freshIndex, err := client.FetchIndex(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to re-fetch index for late merge: %w", err)
 	}
@@ -393,7 +437,7 @@ func (p *Publisher) Publish(ctx context.Context, inputPaths []string) error {
 		freshIndex.AddEntry(res.hash, res.name, res.narinfo, res.digest, res.size, res.refs)
 	}
 
-	if err := p.client.PushIndex(ctx, freshIndex); err != nil {
+	if err := client.PushIndex(ctx, freshIndex); err != nil {
 		return fmt.Errorf("failed to push updated index: %w", err)
 	}
 
@@ -413,38 +457,29 @@ func (p *Publisher) Publish(ctx context.Context, inputPaths []string) error {
 	return nil
 }
 
-func (p *Publisher) publishSingle(ctx context.Context, info nix.PathInfo) (uploadResult, error) {
+func (p *Publisher) publishSingle(ctx context.Context, client *oci.Client, info nix.PathInfo) (uploadResult, error) {
 	log.Action("Processing: %s", info.Path)
 
 	exportStart := time.Now()
 
 	var tempFile, fileHash string
 	var fileSize int64
-	var err error
 
-	if p.cache != nil {
-		entry, cacheErr := p.cache.GetOrCreate(ctx, info.Path, func() (*ExportCacheEntry, error) {
-			tFile, hash, size, e := nix.ExportAndCompress(ctx, info.Path, p.comp, p.jobs, p.compLevel)
-			if e != nil {
-				return nil, e
-			}
-			return &ExportCacheEntry{TempFile: tFile, FileHash: hash, FileSize: size}, nil
-		})
-		if cacheErr != nil {
-			return uploadResult{}, fmt.Errorf("export failed: %w", cacheErr)
+	entry, cacheErr := p.cache.GetOrCreate(ctx, info.Path, func() (*ExportCacheEntry, error) {
+		tFile, hash, size, e := nix.ExportAndCompress(ctx, info.Path, p.comp, p.jobs, p.compLevel)
+		if e != nil {
+			return nil, e
 		}
-		tempFile, fileHash, fileSize = entry.TempFile, entry.FileHash, entry.FileSize
-	} else {
-		tempFile, fileHash, fileSize, err = nix.ExportAndCompress(ctx, info.Path, p.comp, p.jobs, p.compLevel)
-		if err != nil {
-			return uploadResult{}, fmt.Errorf("export failed: %w", err)
-		}
-		defer os.Remove(tempFile)
+		return &ExportCacheEntry{TempFile: tFile, FileHash: hash, FileSize: size}, nil
+	})
+	if cacheErr != nil {
+		return uploadResult{}, fmt.Errorf("export failed: %w", cacheErr)
 	}
+	tempFile, fileHash, fileSize = entry.TempFile, entry.FileHash, entry.FileSize
 
 	exportDuration := time.Since(exportStart)
 
-	digest, uploadSize, err := p.client.UploadBlobMonolithic(ctx, tempFile, fileHash, "NAR")
+	digest, uploadSize, err := client.UploadBlob(ctx, tempFile, fileHash, "NAR", &oci.NoopProgressNotifier{})
 	fileSize = uploadSize
 	uploadDuration := time.Since(exportStart)
 

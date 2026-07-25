@@ -39,7 +39,7 @@ type Result struct {
 	EvictedCount  int
 	EvictedSize   int64
 	EvictedKeys   []string
-	ExpiredRoots  []string // 👈 在计算阶段收集过期 roots，不在 Sweep 阶段原地修改 index 指针
+	ExpiredRoots  []string // Collected during sweep phase, not mutated in-place
 }
 
 func (e *Engine) Sweep(now time.Time, maxSize int64) *Result {
@@ -49,7 +49,7 @@ func (e *Engine) Sweep(now time.Time, maxSize int64) *Result {
 		originalSize += entry.NarSize
 	}
 
-	// 1. 扫描 GC Roots（仅打标收集，保证 Dry-Run 的只读纯粹性）
+	// 1. Scan GC Roots (mark-only for dry-run purity)
 	activeRoots := make([]string, 0)
 	expiredRoots := make([]string, 0)
 	for hash, root := range e.index.Roots {
@@ -60,10 +60,10 @@ func (e *Engine) Sweep(now time.Time, maxSize int64) *Result {
 		activeRoots = append(activeRoots, hash)
 	}
 
-	// 2. 迭代式工作队列染色
+	// 2. Iterative work-queue coloring
 	e.scanClosure(activeRoots, markedSet)
 
-	// 3. 安全宽限期（Grace Period）及临时未染色包分类
+	// 3. Grace period: protect recently uploaded packages
 	candidates := make([]string, 0)
 	var retainedSize int64
 
@@ -82,7 +82,7 @@ func (e *Engine) Sweep(now time.Time, maxSize int64) *Result {
 		candidates = append(candidates, hash)
 	}
 
-	// 3.5 同软件保留 N 个版本
+	// 3.5 Keep N versions per package
 	if e.keepVersions > 0 {
 		versionGroups := make(map[string][]string)
 		for hash, entry := range e.index.Entries {
@@ -119,7 +119,7 @@ func (e *Engine) Sweep(now time.Time, maxSize int64) *Result {
 	evictedKeys := make([]string, 0)
 	var evictedSize int64
 
-	// 4. 配额限制约束收缩
+	// 4. Quota-constrained shrink
 	if maxSize > 0 {
 		currentSize := retainedSize
 		for _, hash := range candidates {
@@ -155,7 +155,7 @@ func (e *Engine) Sweep(now time.Time, maxSize int64) *Result {
 	}
 }
 
-// Apply 执行真正的 Entries 与 Roots 物理删除（仅在此物理写入阶段触发）
+// Apply permanently deletes entries and roots from the index.
 func (e *Engine) Apply(result *Result) {
 	for _, hash := range result.ExpiredRoots {
 		delete(e.index.Roots, hash)
@@ -165,7 +165,7 @@ func (e *Engine) Apply(result *Result) {
 	}
 }
 
-// scanClosure 使用显式本地切片工作栈替代递归，杜绝深层拓扑引起的协程栈扩张与溢出
+// scanClosure uses an explicit stack to avoid recursion overflow on deep dependency chains.
 func (e *Engine) scanClosure(activeRoots []string, markedSet map[string]bool) {
 	queue := append([]string{}, activeRoots...)
 
@@ -193,7 +193,7 @@ func (e *Engine) scanClosure(activeRoots []string, markedSet map[string]bool) {
 	}
 }
 
-// CascadeEvict 执行定向级联驱逐：驱逐指定目标及其所有间接依赖的上层包
+// CascadeEvict evicts targets and all packages that depend on them.
 func (e *Engine) CascadeEvict(targets []string) *Result {
 	var originalSize int64
 	for _, entry := range e.index.Entries {
@@ -267,11 +267,23 @@ func (e *Engine) CascadeEvict(targets []string) *Result {
 
 func basePackageName(name string) string {
 	parts := strings.Split(name, "-")
+
+	// First pass: require "." or length >= 4 to identify version segments.
 	for i := len(parts) - 1; i > 0; i-- {
-		if len(parts[i]) > 0 && parts[i][0] >= '0' && parts[i][0] <= '9' {
+		p := parts[i]
+		if len(p) > 0 && p[0] >= '0' && p[0] <= '9' && (strings.Contains(p, ".") || len(p) >= 4) {
 			return strings.Join(parts[:i], "-")
 		}
 	}
+
+	// Fallback: simple numeric version segments (e.g. "13", "3").
+	for i := len(parts) - 1; i > 0; i-- {
+		p := parts[i]
+		if len(p) > 0 && p[0] >= '0' && p[0] <= '9' {
+			return strings.Join(parts[:i], "-")
+		}
+	}
+
 	return name
 }
 

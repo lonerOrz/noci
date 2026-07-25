@@ -43,7 +43,7 @@ func NewSignerFromKey(content string) (*Signer, error) {
 	}, nil
 }
 
-// SignPath 根据标准 Nix 指纹协议对 Store 路径计算其加签签名
+// SignPath computes an ed25519 signature over the standard Nix fingerprint.
 func (s *Signer) SignPath(storePath, narHash string, narSize int64, refs []string) (string, error) {
 	var refPaths []string
 	for _, r := range refs {
@@ -52,7 +52,7 @@ func (s *Signer) SignPath(storePath, narHash string, narSize int64, refs []strin
 
 	sort.Strings(refPaths)
 
-	// Nix 校验指纹格式： 1;<storePath>;<narHash>;<narSize>;<commaRefs>
+	// Fingerprint: 1;<storePath>;<narHash>;<narSize>;<refs>
 	fingerprint := fmt.Sprintf("1;%s;%s;%d;%s",
 		storePath, narHash, narSize, strings.Join(refPaths, ","))
 
@@ -64,7 +64,7 @@ func (s *Signer) SignPath(storePath, narHash string, narSize int64, refs []strin
 
 const NixAlphabet = "0123456789abcdfghijklmnpqrsvwxyz"
 
-// NormalizeNarHash 将任意 "sha256-xxxx..."（SRI）格式无损转换为标准 "sha256:xxxx..."（Nix Base32）
+// NormalizeNarHash converts a SRI hash (sha256-...) to Nix format (sha256:...).
 func NormalizeNarHash(hash string) (string, error) {
 	if strings.HasPrefix(hash, "sha256:") {
 		return hash, nil
