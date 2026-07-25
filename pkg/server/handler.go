@@ -740,6 +740,13 @@ func (s *Server) probeWriteCapability(ctx context.Context) bool {
 			return false
 		}
 	}
+
+	go func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = s.client.DeleteManifest(cleanupCtx, "noci-probe-write")
+	}()
+
 	log.Info("[noci-proxy] OCI Registry write capability: ENABLED")
 	return true
 }

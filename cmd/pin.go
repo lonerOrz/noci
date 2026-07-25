@@ -22,8 +22,6 @@ var pinCmd = &cobra.Command{
 func init() {
 	pinFlags.Register(pinCmd)
 	pinCmd.Flags().StringVar(&pinTTL, "ttl", "30d", "Time to keep the package pinned (e.g., '30d', '24h', '0' for permanent)")
-
-	RootCmd.AddCommand(pinCmd)
 }
 
 func runPin(cmd *cobra.Command, args []string) error {

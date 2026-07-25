@@ -1,10 +1,10 @@
-# Nix build 产生的软链接
+# Nix build outputs
 .envrc
 .direnv/
 result
 result-*
 
-# 编译生成的二进制文件
+# Built binaries
 /noci
 *.exe
 *.exe~
@@ -12,20 +12,20 @@ result-*
 *.so
 *.dylib
 
-# 测试与性能分析文件
+# Test and coverage artifacts
 *.test
 *.out
 coverage.txt
 profile.out
 
-# Go 工作区文件
+# Go workspace files
 go.work
 go.work.sum
 
-# Vendor 目录
+# Vendor directory
 vendor/
 
-# 临时文件与日志
+# Temp files and logs
 tmp/
 temp/
 *.log
@@ -33,7 +33,7 @@ noci-nar-*.nar.gz
 noci-index-*.json
 noci-config-*.json
 
-# OS & IDE 忽略项
+# OS & IDE
 .DS_Store
 .idea/
 .vscode/

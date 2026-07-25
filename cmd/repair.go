@@ -14,7 +14,7 @@ import (
 )
 
 var (
-	repairFlags CommonFlags
+	repairFlags  CommonFlags
 	repairDryRun bool
 )
 

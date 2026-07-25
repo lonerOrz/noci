@@ -7,13 +7,18 @@ async function run() {
 
   const registry = utils.getState("registry") || "ghcr.io";
   const repo = utils.getState("repo");
-  const token = utils.getState("token");
-  const signingKey = utils.getState("signing-key");
+  const token =
+    process.env.NOCI_TOKEN ||
+    process.env.INPUT_TOKEN ||
+    process.env.GITHUB_TOKEN;
+  const signingKey =
+    process.env.NOCI_SIGNING_KEY || process.env.INPUT_SIGNING_KEY;
 
   if (!proxyPid || !repo || !signingKey) return;
 
   try {
-    const hookLogPath = utils.getState("hook-log-path") || "/tmp/noci-build-paths.log";
+    const hookLogPath =
+      utils.getState("hook-log-path") || "/tmp/noci-build-paths.log";
     if (!fs.existsSync(hookLogPath)) {
       console.log("[noci-action] No build paths recorded. Skipping push.");
       return;

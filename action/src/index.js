@@ -28,8 +28,6 @@ async function run() {
 
     utils.saveState("registry", registry);
     utils.saveState("repo", repo);
-    utils.saveState("token", token);
-    utils.saveState("signing-key", signingKey);
 
     process.env.NOCI_REGISTRY = registry;
     process.env.NOCI_REPO = repo;
@@ -121,7 +119,9 @@ async function prepareBinary() {
       await downloadFile(releaseUrl, target);
       return target;
     } catch (err) {
-      console.log(`[noci-action] Download ${tag} failed, trying latest release...`);
+      console.log(
+        `[noci-action] Download ${tag} failed, trying latest release...`,
+      );
     }
   }
 
@@ -130,7 +130,9 @@ async function prepareBinary() {
     await downloadFile(latestUrl, target);
     return target;
   } catch (err) {
-    console.log(`[noci-action] Latest release download failed, building locally...`);
+    console.log(
+      `[noci-action] Latest release download failed, building locally...`,
+    );
   }
 
   const outLink = "/tmp/noci-result";

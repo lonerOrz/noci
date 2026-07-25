@@ -9,5 +9,4 @@ var indexCmd = &cobra.Command{
 
 func init() {
 	indexCmd.AddCommand(repairCmd)
-	RootCmd.AddCommand(indexCmd)
 }

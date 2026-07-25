@@ -50,7 +50,7 @@ func TestNormalizeNarHash_AlreadyNix(t *testing.T) {
 
 func TestNormalizeNarHash_SRIToNix(t *testing.T) {
 	// sha256-AAAA... (32 bytes of 0) in base64
-zeros := make([]byte, 32)
+	zeros := make([]byte, 32)
 	sri := "sha256-" + base64.RawStdEncoding.EncodeToString(zeros)
 	got, err := NormalizeNarHash(sri)
 	if err != nil {

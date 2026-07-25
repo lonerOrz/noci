@@ -43,7 +43,7 @@ jobs:
         with:
           ref: ${{ github.event.inputs.version }}
       - uses: actions/setup-go@v5
-        with: { go-version: "1.25" }
+        with: { go-version: "1.x" }
       - name: Build
         run: GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} CGO_ENABLED=0 go build -ldflags="-s -w" -o noci-${{ matrix.goos }}-${{ matrix.goarch }} main.go
       - name: Upload Artifacts

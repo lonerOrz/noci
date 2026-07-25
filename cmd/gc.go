@@ -33,8 +33,6 @@ func init() {
 	gcCmd.Flags().StringVar(&gcGracePeriod, "grace-period", "6h", "Safety grace period for newly uploaded files")
 	gcCmd.Flags().BoolVar(&gcPhysicalSweep, "physical-sweep", false, "Physically prune evicted OCI manifests (supports tag-overwriting on GHCR)")
 	gcCmd.Flags().IntVar(&gcKeepVersions, "keep-versions", 3, "Keep at most N recent versions per package name (0 = disabled)")
-
-	RootCmd.AddCommand(gcCmd)
 }
 
 func runGC(cmd *cobra.Command, args []string) error {

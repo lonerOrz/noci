@@ -71,6 +71,7 @@ type StderrProgressNotifier struct {
 	lastPrint  time.Time
 	lastBucket int
 	finished   bool
+	mu         sync.Mutex
 }
 
 func NewStderrProgressNotifier() *StderrProgressNotifier {
@@ -84,6 +85,9 @@ func (n *StderrProgressNotifier) Update(description string, offset, total int64)
 	if total <= 0 {
 		return
 	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
 	pct := float64(offset) * 100 / float64(total)
 	if n.isTTY {
 		now := time.Now()
@@ -101,6 +105,9 @@ func (n *StderrProgressNotifier) Update(description string, offset, total int64)
 }
 
 func (n *StderrProgressNotifier) Finish() {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
 	if n.finished {
 		return
 	}
@@ -114,7 +121,7 @@ func (n *StderrProgressNotifier) Finish() {
 type NoopProgressNotifier struct{}
 
 func (n *NoopProgressNotifier) Update(string, int64, int64) {}
-func (n *NoopProgressNotifier) Finish()                      {}
+func (n *NoopProgressNotifier) Finish()                     {}
 
 const chunkedThreshold = 64 * 1024 * 1024 // 64MB
 
@@ -214,11 +221,24 @@ func (c *Client) doWithRetry(ctx context.Context, method, url, token, contentTyp
 	var err error
 	backoff := time.Second
 
+	var seeker io.ReadSeeker
+	if body != nil {
+		if s, ok := body.(io.ReadSeeker); ok {
+			seeker = s
+		}
+	}
+
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		default:
+		}
+
+		if attempt > 0 && seeker != nil {
+			if _, seekErr := seeker.Seek(0, io.SeekStart); seekErr != nil {
+				return nil, fmt.Errorf("failed to seek request body for retry: %w", seekErr)
+			}
 		}
 
 		var req *http.Request
@@ -235,9 +255,18 @@ func (c *Client) doWithRetry(ctx context.Context, method, url, token, contentTyp
 
 		resp, err = doer(req)
 		if err == nil {
-			if resp.StatusCode < 500 {
+			if resp.StatusCode < 500 && resp.StatusCode != http.StatusTooManyRequests {
 				return resp, nil
 			}
+
+			if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
+				if retryAfter := resp.Header.Get("Retry-After"); retryAfter != "" {
+					if seconds, pErr := strconv.Atoi(retryAfter); pErr == nil && seconds > 0 {
+						backoff = time.Duration(seconds) * time.Second
+					}
+				}
+			}
+
 			resp.Body.Close()
 		}
 

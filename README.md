@@ -101,9 +101,11 @@ jobs:
 ## Cache Consumption
 
 1. **Start the Proxy:**
+
    ```bash
    noci proxy --repo username/repo --port 8080 &
    ```
+
    Each request is logged in real-time: `[noci-proxy] GET /xxx.narinfo - 200 (cache) (2ms)`
 
 2. **Configure Nix:**

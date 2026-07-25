@@ -111,7 +111,7 @@ func TestSweepMaxSize(t *testing.T) {
 		Roots: map[string]oci.GCRoot{},
 	}
 
-	eng := NewEngine(idx, 0) // no grace period
+	eng := NewEngine(idx, 0)       // no grace period
 	result := eng.Sweep(now, 3000) // maxSize = 3000
 
 	// Total = 6000, need to evict down to 3000

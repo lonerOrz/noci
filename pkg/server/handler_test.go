@@ -12,7 +12,7 @@ import (
 
 func TestHealthz_IndexLoaded(t *testing.T) {
 	s := &Server{
-		upstream: "https://cache.nixos.org",
+		upstream:  "https://cache.nixos.org",
 		canDelete: true,
 	}
 	// Simulate loaded index

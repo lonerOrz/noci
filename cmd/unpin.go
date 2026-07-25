@@ -18,7 +18,6 @@ var unpinCmd = &cobra.Command{
 
 func init() {
 	unpinFlags.Register(unpinCmd)
-	RootCmd.AddCommand(unpinCmd)
 }
 
 func runUnpin(cmd *cobra.Command, args []string) error {

@@ -15,14 +15,14 @@ import (
 )
 
 var (
-	pushFlags           CommonFlags
-	pushKeyFile         string
-	pushCompression     string
+	pushFlags            CommonFlags
+	pushKeyFile          string
+	pushCompression      string
 	pushCompressionLevel int
-	pushSkipUpstream    bool
-	pushJobs            int
-	pushProfile         bool
-	pushRegistries      []string
+	pushSkipUpstream     bool
+	pushJobs             int
+	pushProfile          bool
+	pushRegistries       []string
 )
 
 var pushCmd = &cobra.Command{

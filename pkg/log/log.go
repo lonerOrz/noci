@@ -21,7 +21,7 @@ func SetMode(m Mode) { currentMode = m }
 type Verbosity int
 
 const (
-	Quiet   Verbosity = iota
+	Quiet Verbosity = iota
 	Normal
 	Verbose
 )

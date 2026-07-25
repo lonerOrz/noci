@@ -50,7 +50,7 @@ func TestParseSizeString(t *testing.T) {
 		{"1G", 1024 * 1024 * 1024, false},
 		{"1TB", 1024 * 1024 * 1024 * 1024, false},
 		{"1T", 1024 * 1024 * 1024 * 1024, false},
-		{"5mb", 5 * 1024 * 1024, false}, // lowercase
+		{"5mb", 5 * 1024 * 1024, false},             // lowercase
 		{"  2 GB  ", 2 * 1024 * 1024 * 1024, false}, // whitespace
 		{"abc", 0, true},
 	}
