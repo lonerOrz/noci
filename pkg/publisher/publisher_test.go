@@ -3,8 +3,10 @@ package publisher
 import (
 	"context"
 	"crypto/ed25519"
+	"encoding/base64"
 	"noci/pkg/nix"
 	"noci/pkg/oci"
+	"strings"
 	"testing"
 )
 
@@ -255,5 +257,79 @@ func TestStageMergeIndex_EmptyResults(t *testing.T) {
 	}
 	if len(mock.pushedIndex.Entries) != 0 {
 		t.Errorf("expected 0 entries, got %d", len(mock.pushedIndex.Entries))
+	}
+}
+
+func TestStageDiffIndex_WithFakeRunner(t *testing.T) {
+	fakeNix := nix.NewFakeRunner()
+	fakeNix.Closures["/nix/store/0abc1234567890abc1234567890abc12-pkg"] = []string{
+		"/nix/store/0abc1234567890abc1234567890abc12-pkg",
+		"/nix/store/1def2345678901def2345678901def23-dep",
+	}
+	fakeNix.PathInfos["/nix/store/0abc1234567890abc1234567890abc12-pkg"] = nix.PathInfo{
+		Path:    "/nix/store/0abc1234567890abc1234567890abc12-pkg",
+		NarHash: "sha256-BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=",
+		NarSize: 4096,
+	}
+	fakeNix.PathInfos["/nix/store/1def2345678901def2345678901def23-dep"] = nix.PathInfo{
+		Path:    "/nix/store/1def2345678901def2345678901def23-dep",
+		NarHash: "sha256-CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC=",
+		NarSize: 2048,
+	}
+
+	mock := newMockStore()
+	pub := &Publisher{runner: fakeNix, skipUpstream: false}
+
+	uploadList, err := pub.stageDiffIndex(context.Background(), mock, []string{"/nix/store/0abc1234567890abc1234567890abc12-pkg"}, nil, nil)
+	if err != nil {
+		t.Fatalf("stageDiffIndex failed: %v", err)
+	}
+
+	if len(uploadList) != 2 {
+		t.Fatalf("expected 2 paths in upload list, got %d", len(uploadList))
+	}
+}
+
+func TestPublishSingle_WithFakeRunner(t *testing.T) {
+	_, priv, _ := ed25519.GenerateKey(nil)
+	signerKey := "test-key:" + base64.StdEncoding.EncodeToString(priv)
+	signer, err := nix.NewSignerFromKey(signerKey)
+	if err != nil {
+		t.Fatalf("NewSignerFromKey failed: %v", err)
+	}
+
+	fakeNix := nix.NewFakeRunner()
+	mock := newMockStore()
+	pub := &Publisher{
+		signer:  signer,
+		cache:   NewExportCache(),
+		runner:  fakeNix,
+		comp:    "zstd",
+		Profile: false,
+	}
+
+	info := nix.PathInfo{
+		Path:       "/nix/store/0abc1234567890abc1234567890abc12-pkg",
+		NarHash:    "sha256-BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=",
+		NarSize:    4096,
+		References: []string{"/nix/store/1def2345678901def2345678901def23-dep"},
+	}
+
+	result, err := pub.publishSingle(context.Background(), mock, info)
+	if err != nil {
+		t.Fatalf("publishSingle failed: %v", err)
+	}
+
+	if result.hash != "0abc1234567890abc1234567890abc12" {
+		t.Errorf("hash = %q, want 0abc1234567890abc1234567890abc12", result.hash)
+	}
+	if result.name != "pkg" {
+		t.Errorf("name = %q, want pkg", result.name)
+	}
+	if !strings.Contains(result.narinfo, "StorePath: /nix/store/0abc1234567890abc1234567890abc12-pkg") {
+		t.Errorf("narinfo missing StorePath, got: %s", result.narinfo)
+	}
+	if !strings.Contains(result.narinfo, "test-key:") {
+		t.Errorf("narinfo missing signature, got: %s", result.narinfo)
 	}
 }

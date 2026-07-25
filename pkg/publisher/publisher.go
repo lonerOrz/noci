@@ -94,6 +94,7 @@ type Publisher struct {
 	jobs         int
 	Profile      bool
 	cache        *ExportCache
+	runner       nix.Runner
 }
 
 func NewPublisher(clients []*oci.Client, signer *nix.Signer, skipUpstream bool, comp string, compLevel int, jobs int) *Publisher {
@@ -111,6 +112,7 @@ func NewPublisher(clients []*oci.Client, signer *nix.Signer, skipUpstream bool, 
 		compLevel:    compLevel,
 		jobs:         jobs,
 		cache:        NewExportCache(),
+		runner:       nix.DefaultRunner,
 	}
 }
 
@@ -252,7 +254,7 @@ func (p *Publisher) stageDiffIndex(ctx context.Context, store oci.Store, inputPa
 	}
 
 	log.Action("Evaluating closure for %d paths...", len(inputPaths))
-	closure, err := nix.GetClosure(ctx, inputPaths)
+	closure, err := p.runner.GetClosure(ctx, inputPaths)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get closure: %w", err)
 	}
@@ -321,7 +323,7 @@ func (p *Publisher) stageDiffIndex(ctx context.Context, store oci.Store, inputPa
 		return nil, nil
 	}
 
-	infos, err := nix.GetPathInfos(ctx, uncachedPaths)
+	infos, err := p.runner.GetPathInfos(ctx, uncachedPaths)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get path infos: %w", err)
 	}
@@ -486,7 +488,7 @@ func (p *Publisher) publishSingle(ctx context.Context, store oci.Store, info nix
 	exportStart := time.Now()
 
 	entry, cacheErr := p.cache.GetOrCreate(ctx, info.Path, func() (*ExportCacheEntry, error) {
-		tFile, hash, size, e := nix.ExportAndCompress(ctx, info.Path, p.comp, p.jobs, p.compLevel)
+		tFile, hash, size, e := p.runner.ExportAndCompress(ctx, info.Path, p.comp, p.jobs, p.compLevel)
 		if e != nil {
 			return nil, e
 		}
