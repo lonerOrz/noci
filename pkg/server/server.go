@@ -141,7 +141,17 @@ func (s *Server) withMiddleware(next http.HandlerFunc) http.HandlerFunc {
 				"/metrics":     true,
 			}
 			status := strconv.Itoa(lrw.statusCode)
-			s.metrics.inc(r.Method, r.URL.Path, status, lrw.source)
+			// Use route pattern (e.g. "/{hash}.narinfo") instead of raw path
+			// to prevent high-cardinality label explosion from unique hashes.
+			pattern := r.Pattern
+			if pattern == "" {
+				pattern = r.URL.Path
+			}
+			// Strip leading method prefix from pattern ("GET /foo" → "/foo")
+			if idx := strings.IndexByte(pattern, ' '); idx != -1 {
+				pattern = pattern[idx+1:]
+			}
+			s.metrics.inc(r.Method, pattern, status, lrw.source)
 			if silentPaths[r.URL.Path] {
 				return
 			}

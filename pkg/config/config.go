@@ -191,16 +191,34 @@ func autoDetectGitRepo() string {
 		return ""
 	}
 	raw := strings.TrimSpace(string(out))
+	return parseGitRemote(raw)
+}
+
+// parseGitRemote extracts owner/repo from a git remote URL string.
+func parseGitRemote(raw string) string {
 	if strings.HasSuffix(raw, ".git") {
 		raw = strings.TrimSuffix(raw, ".git")
 	}
-	// SSH: git@github.com:owner/repo.git
-	if idx := strings.LastIndex(raw, ":"); idx != -1 && !strings.Contains(raw[idx:], "/") {
-		return raw[idx+1:]
+	// URL-style: https://host/owner/repo or ssh://git@host/owner/repo
+	if idx := strings.Index(raw, "://"); idx != -1 {
+		raw = raw[idx+3:]
+		if atIdx := strings.Index(raw, "@"); atIdx != -1 {
+			raw = raw[atIdx+1:]
+		}
+		if slashIdx := strings.Index(raw, "/"); slashIdx != -1 {
+			raw = raw[slashIdx+1:]
+		}
+		if strings.Count(raw, "/") == 1 && raw != "" && !strings.HasPrefix(raw, "/") {
+			return raw
+		}
+		return ""
 	}
-	// HTTPS: https://github.com/owner/repo
-	if idx := strings.Index(raw, "github.com/"); idx != -1 {
-		return raw[idx+len("github.com/"):]
+	// SSH SCP-style: git@host:owner/repo
+	if idx := strings.LastIndex(raw, ":"); idx != -1 {
+		suffix := raw[idx+1:]
+		if strings.Contains(suffix, "/") {
+			return suffix
+		}
 	}
 	return ""
 }

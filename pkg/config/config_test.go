@@ -65,6 +65,30 @@ func TestParseSize(t *testing.T) {
 	}
 }
 
+func TestParseGitRemote(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"git@github.com:owner/repo.git", "owner/repo"},
+		{"git@github.com:owner/repo", "owner/repo"},
+		{"https://github.com/owner/repo", "owner/repo"},
+		{"https://github.com/owner/repo.git", "owner/repo"},
+		{"git@gitlab.company.com:team/project.git", "team/project"},
+		{"https://gitlab.company.com/team/project", "team/project"},
+		{"ssh://git@github.com/owner/repo.git", "owner/repo"},
+		{"git@gitea.example.com:org/repo.git", "org/repo"},
+		{"", ""},
+	}
+
+	for _, tt := range tests {
+		got := parseGitRemote(tt.input)
+		if got != tt.want {
+			t.Errorf("parseGitRemote(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
+
 func TestIsNixHash(t *testing.T) {
 	tests := []struct {
 		input string

@@ -34,14 +34,17 @@ async function run() {
     process.env.NOCI_TOKEN = token;
     if (signingKey) process.env.NOCI_SIGNING_KEY = signingKey;
 
-    // Unique log path per run attempt — avoids cross-job collisions on self-hosted runners
+    // Unique paths per run attempt — avoids cross-job collisions on self-hosted runners
     const runId = process.env.GITHUB_RUN_ID || "default";
     const runAttempt = process.env.GITHUB_RUN_ATTEMPT || "1";
-    const hookLogPath = `/tmp/noci-build-paths-${runId}-${runAttempt}.log`;
+    const runSuffix = `${runId}-${runAttempt}`;
+    const hookLogPath = `/tmp/noci-build-paths-${runSuffix}.log`;
+    const hookScriptPath = `/tmp/noci-hook-${runSuffix}.sh`;
     utils.saveState("hook-log-path", hookLogPath);
+    utils.saveState("hook-script-path", hookScriptPath);
 
     fs.writeFileSync(
-      "/tmp/noci-hook.sh",
+      hookScriptPath,
       `#!/bin/sh
 for path in $OUT_PATHS; do
   if [ -n "$path" ]; then
@@ -70,7 +73,7 @@ done`,
     const pubKey = await fetchPublicKey(proxyUrl);
 
     const nixConfigParts = [];
-    nixConfigParts.push("post-build-hook = /tmp/noci-hook.sh");
+    nixConfigParts.push(`post-build-hook = ${hookScriptPath}`);
     if (pubKey) {
       nixConfigParts.push(`extra-substituters = ${proxyUrl}`);
       nixConfigParts.push(`extra-trusted-public-keys = ${pubKey}`);

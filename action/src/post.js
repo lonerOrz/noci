@@ -69,7 +69,8 @@ async function run() {
       fs.unlinkSync(hookLogPath);
     } catch (e) {}
     try {
-      fs.unlinkSync("/tmp/noci-hook.sh");
+      const hookScriptPath = utils.getState("hook-script-path") || "/tmp/noci-hook.sh";
+      fs.unlinkSync(hookScriptPath);
     } catch (e) {}
     try {
       const pid = parseInt(proxyPid, 10);

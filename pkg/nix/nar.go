@@ -71,11 +71,16 @@ func ExportAndCompress(ctx context.Context, storePath string, comp string, concu
 
 	dumpCmd := exec.CommandContext(ctx, "nix-store", "--dump", storePath)
 	dumpCmd.Stdout = compressor
+	var errBuf strings.Builder
+	dumpCmd.Stderr = &errBuf
 
 	if err := dumpCmd.Run(); err != nil {
 		_ = tmp.Close()
 		_ = os.Remove(tmp.Name())
 		tmp = nil
+		if stderr := strings.TrimSpace(errBuf.String()); stderr != "" {
+			return "", "", 0, fmt.Errorf("nix-store dump failed: %w (stderr: %s)", err, stderr)
+		}
 		return "", "", 0, fmt.Errorf("nix-store dump failed: %w", err)
 	}
 
