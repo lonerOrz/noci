@@ -351,6 +351,9 @@ func (p *Publisher) stageDiffIndex(ctx context.Context, store oci.Store, inputPa
 	}
 
 	if len(uncachedPaths) == 0 {
+		if tDiff != nil {
+			*tDiff = time.Now()
+		}
 		return &diffResult{index: index, indexDigest: indexDigest}, nil
 	}
 
