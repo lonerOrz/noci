@@ -33,13 +33,6 @@ jobs:
           signing-key: ${{ secrets.NOCI_SIGNING_KEY }}
           token: ${{ secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
 
-      - name: Debug token source
-        run: |
-          echo "GITHUB_EVENT_NAME=${{ github.event_name }}"
-          echo "GH_TOKEN secret set: ${{ secrets.GH_TOKEN != '' }}"
-          echo "NOCI_TOKEN env set: ${NOCI_TOKEN:+yes}"
-          gh auth status 2>&1 || true
-
       - name: Build Local Dummy (Ensure Hook Triggers)
         run: |
           nix build --impure --no-link --expr 'derivation { name = "test-${{ github.sha }}"; system = "x86_64-linux"; builder = "/bin/sh"; args = [ "-c" "echo ${{ github.sha }} > $out" ]; }'
@@ -48,16 +41,8 @@ jobs:
         run: |
           nix build github:lonerOrz/loneros-nur#wooz --no-link -L
 
-      - name: Build and Time Upload Real ISO
+      - name: Build and Push ISO
         run: |
-          echo "=== Token Debug ==="
-          echo "NOCI_TOKEN length: ${#NOCI_TOKEN}"
-          echo "NOCI_REPO: ${NOCI_REPO}"
-          echo "NOCI_REGISTRY: ${NOCI_REGISTRY}"
-          echo ""
-
           ISO_PATH=$(nix build github:lonerOrz/loneros-nixos#packages.x86_64-linux.iso --print-out-paths --no-link -L)
-
           nix path-info -sh "$ISO_PATH"
-
-          NOCI_SIGNING_KEY="$(cat /tmp/noci-test-secret)" go run . push "$ISO_PATH" --profile 2>&1
+          go run . push "$ISO_PATH" --profile
