@@ -221,7 +221,7 @@ func (bs *blobService) uploadBlobChunked(ctx context.Context, filePath, sha256He
 	size = stat.Size()
 
 	var offset int64
-	const chunkSize = 32 * 1024 * 1024
+	const chunkSize = 4 * 1024 * 1024 // 4MB — GHCR limit per PATCH request
 	buf := make([]byte, chunkSize)
 	for offset < size {
 		n, readErr := file.Read(buf)
