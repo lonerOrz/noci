@@ -42,7 +42,11 @@ func (cs *CacheService) GetNarInfo(hash string) (string, bool) {
 		return "", false
 	}
 
-	return cs.rewriteNarInfoURL(&entry), true
+	content := cs.rewriteNarInfoURL(&entry)
+	if content == "" {
+		return "", false
+	}
+	return content, true
 }
 
 func (cs *CacheService) rewriteNarInfoURL(entry *oci.IndexItem) string {

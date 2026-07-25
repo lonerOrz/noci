@@ -458,12 +458,9 @@ func (s *Server) handleAPIDeleteRoute(w http.ResponseWriter, r *http.Request) {
 
 	if err := s.adminSvc.DeletePackage(r.Context(), hash); err != nil {
 		msg := err.Error()
-		switch {
-		case strings.Contains(msg, "not found"):
+		if strings.Contains(msg, "not found") {
 			http.Error(w, msg, http.StatusNotFound)
-		case strings.Contains(msg, "fetch index") || strings.Contains(msg, "push"):
-			http.Error(w, msg, http.StatusInternalServerError)
-		default:
+		} else {
 			http.Error(w, msg, http.StatusInternalServerError)
 		}
 		return
