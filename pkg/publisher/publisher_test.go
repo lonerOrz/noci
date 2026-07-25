@@ -122,12 +122,16 @@ type mockStore struct {
 	pushedManifests map[string]*oci.OCIManifest
 	index           *oci.CacheIndex
 	pushedIndex     *oci.CacheIndex
+	// manifestDigests controls what ManifestExists returns for each tag.
+	// Key is tag name, value is the Docker-Content-Digest header value.
+	manifestDigests map[string]string
 }
 
 func newMockStore() *mockStore {
 	return &mockStore{
 		pushedManifests: make(map[string]*oci.OCIManifest),
 		index:           oci.NewIndex("ghcr.io", "test/repo"),
+		manifestDigests: make(map[string]string),
 	}
 }
 
@@ -136,6 +140,9 @@ func (m *mockStore) FetchIndex(_ context.Context) (*oci.CacheIndex, error) {
 }
 
 func (m *mockStore) ManifestExists(_ context.Context, tag string) (bool, string) {
+	if digest, ok := m.manifestDigests[tag]; ok {
+		return true, digest
+	}
 	return false, ""
 }
 
@@ -202,7 +209,8 @@ func TestStageEnsurePublicKey_NilSigner(t *testing.T) {
 
 func TestStageMergeIndex(t *testing.T) {
 	mock := newMockStore()
-	pub := &Publisher{}
+	// No index digest set → slow path, FetchIndex returns the existing index
+	pub := &Publisher{logger: log.DefaultLogger{}}
 
 	results := []uploadResult{
 		{
@@ -223,7 +231,7 @@ func TestStageMergeIndex(t *testing.T) {
 		},
 	}
 
-	err := pub.stageMergeIndex(context.Background(), mock, results)
+	err := pub.stageMergeIndex(context.Background(), mock, mock.index, "sha256:initial", results)
 	if err != nil {
 		t.Fatalf("stageMergeIndex failed: %v", err)
 	}
@@ -246,18 +254,15 @@ func TestStageMergeIndex(t *testing.T) {
 
 func TestStageMergeIndex_EmptyResults(t *testing.T) {
 	mock := newMockStore()
-	pub := &Publisher{}
+	pub := &Publisher{logger: log.DefaultLogger{}}
 
-	err := pub.stageMergeIndex(context.Background(), mock, nil)
+	err := pub.stageMergeIndex(context.Background(), mock, mock.index, "sha256:initial", nil)
 	if err != nil {
 		t.Fatalf("stageMergeIndex with empty results failed: %v", err)
 	}
 
-	if mock.pushedIndex == nil {
-		t.Fatal("expected index to be pushed even with empty results")
-	}
-	if len(mock.pushedIndex.Entries) != 0 {
-		t.Errorf("expected 0 entries, got %d", len(mock.pushedIndex.Entries))
+	if mock.pushedIndex != nil {
+		t.Fatal("expected index NOT to be pushed with empty results")
 	}
 }
 
@@ -281,13 +286,17 @@ func TestStageDiffIndex_WithFakeRunner(t *testing.T) {
 	mock := newMockStore()
 	pub := &Publisher{runner: fakeNix, skipUpstream: false, logger: log.DefaultLogger{}}
 
-	uploadList, err := pub.stageDiffIndex(context.Background(), mock, []string{"/nix/store/0abc1234567890abc1234567890abc12-pkg"}, nil, nil)
+	result, err := pub.stageDiffIndex(context.Background(), mock, []string{"/nix/store/0abc1234567890abc1234567890abc12-pkg"}, nil, nil)
 	if err != nil {
 		t.Fatalf("stageDiffIndex failed: %v", err)
 	}
 
-	if len(uploadList) != 2 {
-		t.Fatalf("expected 2 paths in upload list, got %d", len(uploadList))
+	if len(result.uploadList) != 2 {
+		t.Fatalf("expected 2 paths in upload list, got %d", len(result.uploadList))
+	}
+
+	if result.index == nil {
+		t.Error("expected index to be returned")
 	}
 }
 
@@ -333,5 +342,82 @@ func TestPublishSingle_WithFakeRunner(t *testing.T) {
 	}
 	if !strings.Contains(result.narinfo, "test-key:") {
 		t.Errorf("narinfo missing signature, got: %s", result.narinfo)
+	}
+}
+
+func TestStageEnsurePublicKey_SkipsIfExists(t *testing.T) {
+	mock := newMockStore()
+	_, priv, _ := ed25519.GenerateKey(nil)
+	pub := &Publisher{signer: &nix.Signer{KeyName: "test-key", PrivateKey: priv}, Profile: true, logger: log.DefaultLogger{}}
+
+	// Pre-populate: public-key manifest already exists
+	mock.manifestDigests["public-key"] = "sha256:existing"
+
+	err := pub.stageEnsurePublicKey(context.Background(), mock)
+	if err != nil {
+		t.Fatalf("stageEnsurePublicKey failed: %v", err)
+	}
+
+	// Should NOT have pushed a new manifest
+	if _, ok := mock.pushedManifests["public-key"]; ok {
+		t.Error("should not push manifest when it already exists")
+	}
+}
+
+func TestStageMergeIndex_FastPath(t *testing.T) {
+	mock := newMockStore()
+	pub := &Publisher{Profile: true, logger: log.DefaultLogger{}}
+
+	// Simulate: remote index has same digest as initial → fast-path
+	initialDigest := "sha256:abc123"
+	mock.manifestDigests["noci-index"] = initialDigest
+
+	initialIndex := oci.NewIndex("ghcr.io", "test/repo")
+	results := []uploadResult{
+		{hash: "0abc1234567890abc1234567890abc12", name: "pkg", narinfo: "test", digest: "sha256:1111", size: 100},
+	}
+
+	err := pub.stageMergeIndex(context.Background(), mock, initialIndex, initialDigest, results)
+	if err != nil {
+		t.Fatalf("stageMergeIndex failed: %v", err)
+	}
+
+	// Should have pushed the SAME index object (fast-path reused it)
+	if mock.pushedIndex != initialIndex {
+		t.Error("fast-path should reuse the initial index object")
+	}
+
+	// Entry should be added
+	if _, ok := mock.pushedIndex.Entries["0abc1234567890abc1234567890abc12"]; !ok {
+		t.Error("expected entry to be added to fast-path index")
+	}
+}
+
+func TestStageMergeIndex_SlowPath(t *testing.T) {
+	mock := newMockStore()
+	pub := &Publisher{logger: log.DefaultLogger{}}
+
+	// Simulate: remote index has DIFFERENT digest → slow-path re-fetches
+	initialDigest := "sha256:old"
+	mock.manifestDigests["noci-index"] = "sha256:new"
+
+	initialIndex := oci.NewIndex("ghcr.io", "test/repo")
+	results := []uploadResult{
+		{hash: "0abc1234567890abc1234567890abc12", name: "pkg", narinfo: "test", digest: "sha256:1111", size: 100},
+	}
+
+	err := pub.stageMergeIndex(context.Background(), mock, initialIndex, initialDigest, results)
+	if err != nil {
+		t.Fatalf("stageMergeIndex failed: %v", err)
+	}
+
+	// Should have pushed a DIFFERENT index object (slow-path re-fetched)
+	if mock.pushedIndex == initialIndex {
+		t.Error("slow-path should NOT reuse the initial index object")
+	}
+
+	// Entry should still be added
+	if _, ok := mock.pushedIndex.Entries["0abc1234567890abc1234567890abc12"]; !ok {
+		t.Error("expected entry to be added to slow-path index")
 	}
 }

@@ -136,6 +136,14 @@ type uploadResult struct {
 	refs    []string
 }
 
+// diffResult holds the output of stageDiffIndex, including the fetched index
+// and its manifest digest for optimistic concurrency in stageMergeIndex.
+type diffResult struct {
+	uploadList  []nix.PathInfo
+	index       *oci.CacheIndex
+	indexDigest string
+}
+
 // Publish runs the full publish pipeline across all registries.
 func (p *Publisher) Publish(ctx context.Context, inputPaths []string) error {
 	defer p.cache.Cleanup()
@@ -189,12 +197,12 @@ func (p *Publisher) publishToRegistry(ctx context.Context, store oci.Store, inpu
 	}
 	t1 = time.Now()
 
-	uploadList, err := p.stageDiffIndex(ctx, store, inputPaths, &t2, &t3)
+	dr, err := p.stageDiffIndex(ctx, store, inputPaths, &t2, &t3)
 	if err != nil {
 		return fmt.Errorf("pipeline stage diff-index failed: %w", err)
 	}
 
-	if len(uploadList) == 0 {
+	if len(dr.uploadList) == 0 {
 		if p.Profile {
 			p.logger.Info("[profile] Publish pipeline:")
 			p.logger.Info("  - Sign/PushManifest: %v", t1.Sub(t0))
@@ -206,13 +214,13 @@ func (p *Publisher) publishToRegistry(ctx context.Context, store oci.Store, inpu
 		return nil
 	}
 
-	results, err := p.stageUploadConcurrently(ctx, store, uploadList)
+	results, err := p.stageUploadConcurrently(ctx, store, dr.uploadList)
 	if err != nil {
 		return fmt.Errorf("pipeline stage upload failed: %w", err)
 	}
 	t4 = time.Now()
 
-	if err := p.stageMergeIndex(ctx, store, results); err != nil {
+	if err := p.stageMergeIndex(ctx, store, dr.index, dr.indexDigest, results); err != nil {
 		return fmt.Errorf("pipeline stage merge-index failed: %w", err)
 	}
 	t5 = time.Now()
@@ -227,15 +235,24 @@ func (p *Publisher) publishToRegistry(ctx context.Context, store oci.Store, inpu
 		p.logger.Info("  - Total:             %v", time.Since(totalStart))
 	}
 
-	p.logger.Success("Cached %d packages successfully.", len(uploadList))
+	p.logger.Success("Cached %d packages successfully.", len(dr.uploadList))
 	return nil
 }
 
 // stageEnsurePublicKey pushes the signing public key as an OCI manifest.
+// Skips if the manifest already exists in the registry.
 func (p *Publisher) stageEnsurePublicKey(ctx context.Context, store oci.Store) error {
 	if p.signer == nil {
 		return nil
 	}
+
+	if exists, _ := store.ManifestExists(ctx, "public-key"); exists {
+		if p.Profile {
+			p.logger.Info("[profile] Public key manifest already exists, skipping push.")
+		}
+		return nil
+	}
+
 	pubKey := p.signer.PrivateKey.Public().(ed25519.PublicKey)
 	publicKeyStr := fmt.Sprintf("%s:%s",
 		p.signer.KeyName,
@@ -255,7 +272,7 @@ func (p *Publisher) stageEnsurePublicKey(ctx context.Context, store oci.Store) e
 // stageDiffIndex computes the closure, diffs against the remote index,
 // repairs stale entries, filters upstream-cached paths, and returns the upload list.
 // tFetch and tDiff are optional timing outputs for profiling.
-func (p *Publisher) stageDiffIndex(ctx context.Context, store oci.Store, inputPaths []string, tFetch, tDiff *time.Time) ([]nix.PathInfo, error) {
+func (p *Publisher) stageDiffIndex(ctx context.Context, store oci.Store, inputPaths []string, tFetch, tDiff *time.Time) (*diffResult, error) {
 	index, err := store.FetchIndex(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load index: %w", err)
@@ -263,6 +280,9 @@ func (p *Publisher) stageDiffIndex(ctx context.Context, store oci.Store, inputPa
 	if tFetch != nil {
 		*tFetch = time.Now()
 	}
+
+	// Capture remote index digest for optimistic concurrency in LateMerge
+	_, indexDigest := store.ManifestExists(ctx, "noci-index")
 
 	p.logger.Action("Evaluating closure for %d paths...", len(inputPaths))
 	closure, err := p.runner.GetClosure(ctx, inputPaths)
@@ -331,7 +351,7 @@ func (p *Publisher) stageDiffIndex(ctx context.Context, store oci.Store, inputPa
 	}
 
 	if len(uncachedPaths) == 0 {
-		return nil, nil
+		return &diffResult{index: index, indexDigest: indexDigest}, nil
 	}
 
 	infos, err := p.runner.GetPathInfos(ctx, uncachedPaths)
@@ -377,7 +397,11 @@ func (p *Publisher) stageDiffIndex(ctx context.Context, store oci.Store, inputPa
 		*tDiff = time.Now()
 	}
 
-	return uploadList, nil
+	return &diffResult{
+		uploadList:  uploadList,
+		index:       index,
+		indexDigest: indexDigest,
+	}, nil
 }
 
 // stageUploadConcurrently exports NARs, uploads blobs, and pushes manifests in parallel.
@@ -475,21 +499,37 @@ func (p *Publisher) stageUploadConcurrently(ctx context.Context, store oci.Store
 	return results, nil
 }
 
-// stageMergeIndex re-fetches the index, adds all new entries, and pushes.
-func (p *Publisher) stageMergeIndex(ctx context.Context, store oci.Store, results []uploadResult) error {
-	freshIndex, err := store.FetchIndex(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to re-fetch index for late merge: %w", err)
+// stageMergeIndex adds new entries to the index and pushes.
+// Uses optimistic concurrency: if the remote index digest hasn't changed,
+// reuses the local index instead of re-fetching.
+func (p *Publisher) stageMergeIndex(ctx context.Context, store oci.Store, initialIndex *oci.CacheIndex, initialDigest string, results []uploadResult) error {
+	if len(results) == 0 {
+		return nil
+	}
+
+	var targetIndex *oci.CacheIndex
+
+	// Fast-Path: HEAD check if remote index is unchanged
+	_, currentDigest := store.ManifestExists(ctx, "noci-index")
+	if currentDigest != "" && currentDigest == initialDigest && initialIndex != nil {
+		if p.Profile {
+			p.logger.Info("[profile] LateMerge: digest match, reusing local index (Fast-Path)")
+		}
+		targetIndex = initialIndex
+	} else {
+		// Slow-Path: remote index was modified concurrently, re-fetch
+		freshIndex, err := store.FetchIndex(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to re-fetch index for late merge: %w", err)
+		}
+		targetIndex = freshIndex
 	}
 
 	for _, res := range results {
-		freshIndex.AddEntry(res.hash, res.name, res.narinfo, res.digest, res.size, res.refs)
+		targetIndex.AddEntry(res.hash, res.name, res.narinfo, res.digest, res.size, res.refs)
 	}
 
-	if err := store.PushIndex(ctx, freshIndex); err != nil {
-		return fmt.Errorf("failed to push updated index: %w", err)
-	}
-	return nil
+	return store.PushIndex(ctx, targetIndex)
 }
 
 // publishSingle handles export, upload, signing, and narinfo generation for one store path.
