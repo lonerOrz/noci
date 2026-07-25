@@ -34,6 +34,11 @@ async function run() {
     process.env.NOCI_TOKEN = token;
     if (signingKey) process.env.NOCI_SIGNING_KEY = signingKey;
 
+    utils.exportVariable("NOCI_REGISTRY", registry);
+    utils.exportVariable("NOCI_REPO", repo);
+    utils.exportVariable("NOCI_TOKEN", token);
+    if (signingKey) utils.exportVariable("NOCI_SIGNING_KEY", signingKey);
+
     // Unique paths per run attempt — avoids cross-job collisions on self-hosted runners
     const runId = process.env.GITHUB_RUN_ID || "default";
     const runAttempt = process.env.GITHUB_RUN_ATTEMPT || "1";

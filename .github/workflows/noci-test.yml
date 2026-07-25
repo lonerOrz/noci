@@ -29,7 +29,7 @@ jobs:
       - name: Setup noci binary cache
         uses: ./action
         with:
-          repo: ${{ secrets.NOCI_REPO || 'lonerOrz/noci-cache' }}
+          repo: ${{ secrets.NOCI_REPO || github.repository }}
           signing-key: ${{ secrets.NOCI_SIGNING_KEY }}
           token: ${{ secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
 
@@ -48,8 +48,3 @@ jobs:
           nix path-info -sh "$ISO_PATH"
 
           go run . push "$ISO_PATH" --profile
-        env:
-          NOCI_REGISTRY: ${{ secrets.NOCI_REGISTRY || 'ghcr.io' }}
-          NOCI_REPO: ${{ secrets.NOCI_REPO || 'lonerOrz/noci-cache' }}
-          NOCI_SIGNING_KEY: ${{ secrets.NOCI_SIGNING_KEY }}
-          NOCI_TOKEN: ${{ secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
