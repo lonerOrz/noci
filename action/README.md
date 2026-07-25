@@ -10,7 +10,7 @@ Zero-config Nix binary cache over OCI for GitHub Actions.
 ```yaml
 steps:
   - uses: cachix/install-nix-action@v30
-  - uses: lonerOrz/noci@dev/action
+  - uses: lonerOrz/noci@v1/action
   - run: nix build .#my-package   # pulls from OCI cache automatically
 ```
 
@@ -19,7 +19,7 @@ steps:
 ```yaml
 steps:
   - uses: cachix/install-nix-action@v30
-  - uses: lonerOrz/noci@dev/action
+  - uses: lonerOrz/noci@v1/action
     with:
       signing-key: ${{ secrets.NOCI_SIGNING_KEY }}
   - run: nix build .#my-package   # cache hit reads, new paths auto-push after job
@@ -28,7 +28,7 @@ steps:
 ## Full Configuration
 
 ```yaml
-- uses: lonerOrz/noci@dev/action
+- uses: lonerOrz/noci@v1/action
   with:
     # ── Registry ──
     registry: ghcr.io                          # OCI endpoint (default: ghcr.io)
@@ -58,13 +58,13 @@ Use `proxy-url` as an `extra-substituters` in downstream jobs:
 
 ```yaml
 # Job 1: build + push
-- uses: lonerOrz/noci@dev/action
+- uses: lonerOrz/noci@v1/action
   id: noci
   with:
     signing-key: ${{ secrets.NOCI_SIGNING_KEY }}
 
 # Job 2: fetch-only from the same cache
-- uses: lonerOrz/noci@dev/action
+- uses: lonerOrz/noci@v1/action
   with:
     proxy-port: "0"
 ```
@@ -74,7 +74,7 @@ Use `proxy-url` as an `extra-substituters` in downstream jobs:
 For explicit control over what gets pushed:
 
 ```yaml
-- uses: lonerOrz/noci@dev/action
+- uses: lonerOrz/noci@v1/action
   with:
     signing-key: ${{ secrets.NOCI_SIGNING_KEY }}
 
