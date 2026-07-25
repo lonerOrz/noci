@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"noci/pkg/config"
 	"noci/pkg/log"
 	"noci/pkg/oci"
 
@@ -32,7 +33,7 @@ func runUnpin(cmd *cobra.Command, args []string) error {
 	}
 
 	// Resolve inputs: no nix build fallback.
-	inputHashes, err := resolveHashes(ctx, args, false)
+	inputHashes, err := config.ResolveHashes(ctx, args, false)
 	if err != nil {
 		return err
 	}

@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"noci/pkg/config"
 	"noci/pkg/log"
 	"noci/pkg/oci"
 
@@ -36,13 +37,13 @@ func runPin(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	ttlSeconds, err := parseTTL(pinTTL)
+	ttlSeconds, err := config.ParseTTL(pinTTL)
 	if err != nil {
 		return fmt.Errorf("invalid --ttl value: %w", err)
 	}
 
 	// Resolve inputs: allow nix build fallback.
-	inputHashes, err := resolveHashes(ctx, args, true)
+	inputHashes, err := config.ResolveHashes(ctx, args, true)
 	if err != nil {
 		return err
 	}

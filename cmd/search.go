@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"noci/pkg/config"
 	"noci/pkg/log"
 	"noci/pkg/oci"
 	"sort"
@@ -51,7 +52,7 @@ func runSearch(cmd *cobra.Command, args []string) error {
 			matched = append(matched, match{hash: hash, item: entry})
 		}
 	} else {
-		resolved, err := resolveHashes(ctx, args, false)
+		resolved, err := config.ResolveHashes(ctx, args, false)
 		if err == nil && len(resolved) > 0 {
 			seen := make(map[string]bool)
 			for _, rh := range resolved {

@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"noci/pkg/config"
 	"noci/pkg/log"
 	"noci/pkg/oci"
 	"sort"
@@ -57,7 +58,7 @@ func runRepair(cmd *cobra.Command, args []string) error {
 	var candidateHashes []string
 	for _, tag := range tags {
 		lower := strings.ToLower(tag)
-		if nixHashRegex.MatchString(lower) {
+		if config.IsNixHash(lower) {
 			if _, exists := index.Entries[lower]; !exists {
 				candidateHashes = append(candidateHashes, lower)
 			}

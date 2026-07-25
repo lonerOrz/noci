@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"noci/pkg/config"
 	"noci/pkg/log"
 	"noci/pkg/nix"
 	"noci/pkg/oci"
@@ -45,7 +46,11 @@ func init() {
 func runPush(cmd *cobra.Command, args []string) error {
 	ctx := cmd.Context()
 
-	cfg, err := pushFlags.Resolve()
+	cfg, err := config.Load(config.Options{
+		Registry:        pushFlags.Registry,
+		Repo:            pushFlags.Repo,
+		ExtraRegistries: pushRegistries,
+	})
 	if err != nil {
 		return err
 	}
@@ -126,13 +131,8 @@ func runPush(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("unsupported compression: %q (use 'zstd' or 'gzip')", pushCompression)
 	}
 
-	entries, err := ResolveRegistries(pushRegistries, cfg)
-	if err != nil {
-		return err
-	}
-
-	clients := make([]*oci.Client, 0, len(entries))
-	for _, e := range entries {
+	clients := make([]*oci.Client, 0, len(cfg.Registries))
+	for _, e := range cfg.Registries {
 		client := oci.NewClient(e.Registry, e.Repo, e.Token)
 		client.Profile = pushProfile
 		clients = append(clients, client)

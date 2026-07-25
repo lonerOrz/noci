@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"noci/pkg/config"
 	"noci/pkg/gc"
 	"noci/pkg/log"
 	"noci/pkg/oci"
@@ -43,7 +44,7 @@ func runGC(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	maxBytes, err := parseSizeString(gcMaxSize)
+	maxBytes, err := config.ParseSize(gcMaxSize)
 	if err != nil {
 		return fmt.Errorf("failed to parse max-size: %w", err)
 	}
@@ -64,7 +65,7 @@ func runGC(cmd *cobra.Command, args []string) error {
 	var result *gc.Result
 
 	if len(args) > 0 {
-		inputHashes, err := resolveHashes(ctx, args, false)
+		inputHashes, err := config.ResolveHashes(ctx, args, false)
 		if err != nil {
 			return err
 		}

@@ -1,9 +1,6 @@
-package cmd
+package config
 
-import (
-	"noci/pkg/config"
-	"testing"
-)
+import "testing"
 
 func TestParseTTL(t *testing.T) {
 	tests := []struct {
@@ -23,18 +20,18 @@ func TestParseTTL(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		got, err := config.ParseTTL(tt.input)
+		got, err := ParseTTL(tt.input)
 		if (err != nil) != tt.err {
-			t.Errorf("config.ParseTTL(%q) error = %v, wantErr %v", tt.input, err, tt.err)
+			t.Errorf("ParseTTL(%q) error = %v, wantErr %v", tt.input, err, tt.err)
 			continue
 		}
 		if got != tt.want {
-			t.Errorf("config.ParseTTL(%q) = %d, want %d", tt.input, got, tt.want)
+			t.Errorf("ParseTTL(%q) = %d, want %d", tt.input, got, tt.want)
 		}
 	}
 }
 
-func TestParseSizeString(t *testing.T) {
+func TestParseSize(t *testing.T) {
 	tests := []struct {
 		input string
 		want  int64
@@ -57,13 +54,35 @@ func TestParseSizeString(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		got, err := config.ParseSize(tt.input)
+		got, err := ParseSize(tt.input)
 		if (err != nil) != tt.err {
-			t.Errorf("config.ParseSize(%q) error = %v, wantErr %v", tt.input, err, tt.err)
+			t.Errorf("ParseSize(%q) error = %v, wantErr %v", tt.input, err, tt.err)
 			continue
 		}
 		if got != tt.want {
-			t.Errorf("config.ParseSize(%q) = %d, want %d", tt.input, got, tt.want)
+			t.Errorf("ParseSize(%q) = %d, want %d", tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestIsNixHash(t *testing.T) {
+	tests := []struct {
+		input string
+		want  bool
+	}{
+		{"0123456789abcdf0123456789abcdf01", true},   // 32 valid chars
+		{"abcdfghijklmnpqrsvwxyz0123456789", true},   // 32 valid chars
+		{"0123456789abcdf0123456789abcdf0", false},   // 31 chars
+		{"0123456789abcdf0123456789abcdf012", false}, // 33 chars
+		{"", false},
+		{"hello world", false},
+		{"0123456789ABCDF0123456789ABCDF01", true}, // uppercase should match
+	}
+
+	for _, tt := range tests {
+		got := IsNixHash(tt.input)
+		if got != tt.want {
+			t.Errorf("IsNixHash(%q) = %v, want %v", tt.input, got, tt.want)
 		}
 	}
 }
