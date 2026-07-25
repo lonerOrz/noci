@@ -1,98 +1,51 @@
 # noci-action
 
-A zero-config GitHub Action that turns any OCI registry into a Nix binary cache.
+Zero-config Nix binary cache over OCI for GitHub Actions.
 
-**Push mode**: provide a signing key → built paths are automatically pushed after each job.
-**Fetch-only mode**: no signing key → proxy serves cached paths from the registry (read-only).
+**Fetch-only** (default): proxy serves cached paths from any OCI registry. No signing key needed.
+**Push mode**: add a signing key → built paths auto-push after each job. Cache errors never break your CI.
 
-## Quick Start
-
-```yaml
-- name: Setup noci binary cache
-  uses: lonerOrz/noci@dev/action
-  with:
-    signing-key: ${{ secrets.NOCI_SIGNING_KEY }}
-```
-
-That's it. The action:
-1. Downloads or builds the `noci` binary
-2. Starts a local proxy and configures Nix to use it
-3. Collects all `nix build` output paths during the job
-4. Pushes them to your OCI registry after the job completes
-
-## Minimal (push + fetch)
+## 1-Line Setup (Fetch-Only)
 
 ```yaml
 steps:
-  - uses: actions/checkout@v4
   - uses: cachix/install-nix-action@v30
+  - uses: lonerOrz/noci@dev/action
+  - run: nix build .#my-package   # pulls from OCI cache automatically
+```
 
-  - name: Setup noci
-    uses: lonerOrz/noci@dev/action
+## 1-Line Setup (Push + Fetch)
+
+```yaml
+steps:
+  - uses: cachix/install-nix-action@v30
+  - uses: lonerOrz/noci@dev/action
     with:
       signing-key: ${{ secrets.NOCI_SIGNING_KEY }}
-
-  - run: nix build .#my-package
-  # Paths are pushed automatically after this step
+  - run: nix build .#my-package   # cache hit reads, new paths auto-push after job
 ```
 
 ## Full Configuration
 
 ```yaml
-- name: Setup noci
-  uses: lonerOrz/noci@dev/action
+- uses: lonerOrz/noci@dev/action
   with:
-    registry: ghcr.io                    # OCI registry (default: ghcr.io)
-    repo: myorg/mycache                   # OCI repo (default: GITHUB_REPOSITORY)
-    token: ${{ secrets.GITHUB_TOKEN }}   # Registry auth (default: GITHUB_TOKEN)
-    signing-key: ${{ secrets.NOCI_SIGNING_KEY }}  # Nix signing key (key_name:base64)
-    skip-upstream: "true"                # Skip packages with upstream sigs (default: true)
-    proxy-port: "0"                      # Proxy port, 0=random (default: 0)
+    # ── Registry ──
+    registry: ghcr.io                          # OCI endpoint (default: ghcr.io)
+    repo: myorg/mycache                        # OCI repo (default: GITHUB_REPOSITORY)
+    token: ${{ secrets.GITHUB_TOKEN }}         # Auth token (default: GITHUB_TOKEN)
+    signing-key: ${{ secrets.NOCI_SIGNING_KEY }} # Nix key (key_name:base64, omit = fetch-only)
+
+    # ── Performance ──
+    compression: zstd                          # zstd or gzip (default: zstd)
+    compression-level: 6                       # 1-19 for zstd (default: 3)
+    jobs: 4                                    # Compression threads, 0=auto (default: 0)
+    skip-upstream: "true"                      # Skip cache.nixos.org-signed paths (default: true)
+
+    # ── Reliability ──
+    fail-on-error: "false"                     # Push errors = warning, not failure (default: false)
+    proxy-port: "0"                            # Local proxy port, 0=random (default: 0)
 ```
-
-## Custom Push
-
-For manual control over what gets pushed:
-
-```yaml
-- name: Setup noci
-  uses: lonerOrz/noci@dev/action
-  with:
-    signing-key: ${{ secrets.NOCI_SIGNING_KEY }}
-
-- name: Build
-  run: nix build .#my-package --print-out-paths > /tmp/paths.txt
-
-- name: Push
-  run: noci push $(cat /tmp/paths.txt)
-  env:
-    NOCI_SIGNING_KEY: ${{ secrets.NOCI_SIGNING_KEY }}
-```
-
-## Multi-Registry Push
-
-Push to multiple registries in one job:
-
-```yaml
-- name: Setup noci
-  uses: lonerOrz/noci@dev/action
-  with:
-    signing-key: ${{ secrets.NOCI_SIGNING_KEY }}
-    registries: |
-      ghcr.io/myorg/cache
-      registry.example.com/team/nix-cache
-```
-
-## Inputs
-
-| Input           | Description                                    | Default               |
-| :-------------- | :--------------------------------------------- | :-------------------- |
-| `registry`      | OCI registry endpoint                          | `ghcr.io`             |
-| `repo`          | OCI repository (`owner/repo`)                  | `GITHUB_REPOSITORY`   |
-| `token`         | Registry auth token                            | `GITHUB_TOKEN`        |
-| `signing-key`   | Nix signing key (`key_name:base64`)            | _(none — fetch-only)_ |
-| `skip-upstream` | Skip packages with upstream cache.nixos.org    | `true`                |
-| `proxy-port`    | Local proxy port (`0` = random)                | `0`                   |
 
 ## Outputs
 
@@ -100,6 +53,37 @@ Push to multiple registries in one job:
 | :------------- | :--------------------------------- |
 | `proxy-url`    | HTTP address of the local proxy    |
 | `pushed-count` | Number of paths pushed to registry |
+
+Use `proxy-url` as an `extra-substituters` in downstream jobs:
+
+```yaml
+# Job 1: build + push
+- uses: lonerOrz/noci@dev/action
+  id: noci
+  with:
+    signing-key: ${{ secrets.NOCI_SIGNING_KEY }}
+
+# Job 2: fetch-only from the same cache
+- uses: lonerOrz/noci@dev/action
+  with:
+    proxy-port: "0"
+```
+
+## Manual Push
+
+For explicit control over what gets pushed:
+
+```yaml
+- uses: lonerOrz/noci@dev/action
+  with:
+    signing-key: ${{ secrets.NOCI_SIGNING_KEY }}
+
+- run: |
+    paths=$(nix build .#my-package --print-out-paths)
+    noci push $paths
+  env:
+    NOCI_SIGNING_KEY: ${{ secrets.NOCI_SIGNING_KEY }}
+```
 
 ## Permissions
 
@@ -111,7 +95,9 @@ permissions:
 
 ## Self-hosted Runners
 
-Keep `proxy-port: 0` (default) to avoid port collisions on shared hosts. Each run gets a unique hook script path based on `GITHUB_RUN_ID` and `GITHUB_RUN_ATTEMPT`.
+- Keep `proxy-port: 0` (default) for automatic ephemeral port allocation
+- Each run gets isolated hook/log paths via `GITHUB_RUN_ID` + `GITHUB_RUN_ATTEMPT`
+- Proxy process is automatically killed in the post step
 
 ## How It Works
 
@@ -129,7 +115,24 @@ Keep `proxy-port: 0` (default) to avoid port collisions on shared hosts. Each ru
 └─────────────┘     └──────────┘
 ```
 
-1. **Proxy** starts and configures Nix to use it as a substituter
-2. **Build** steps pull dependencies through the proxy (cache hit) or upstream
-3. **Hook** collects all built output paths to a log file
-4. **Push** uploads new paths to the OCI registry after the job
+1. **Proxy** starts, configures Nix substituter via `NIX_CONFIG`
+2. **Build** steps pull dependencies through proxy (hit) or upstream (miss)
+3. **Hook** collects all built output paths to an isolated log file
+4. **Push** uploads new paths to OCI registry after the job (if signing key provided)
+
+## Architecture
+
+```
+action/src/
+├── config.js    — loadConfig(): resolve 10 inputs with smart defaults
+├── binary.js    — ensureBinary(): prebuilt → download → nix build fallback
+├── proxy.js     — startProxy(): daemon, port detection, NIX_CONFIG injection
+├── index.js     — main entry (15 lines): loadConfig → ensureBinary → startProxy
+├── post.js      — post entry: collectPaths → push (with compression args) → cleanup
+└── utils.js     — GitHub Actions helpers (state, env, output)
+```
+
+Key design decisions:
+- **`fail-on-error: false`** — cache failures are warnings, never break CI
+- **Compression passthrough** — post.js passes `--compression`, `--compression-level`, `--jobs` to `noci push`
+- **Fetch-only mode** — no signing key = silent skip, no errors, no warnings
