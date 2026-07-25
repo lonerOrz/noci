@@ -77,9 +77,9 @@ func runGC(cmd *cobra.Command, args []string) error {
 	}
 
 	log.Info("GC Summary:")
-	fmt.Printf("  Live:    %d (%d B)\n", result.OriginalCount, result.OriginalSize)
-	fmt.Printf("  Keep:    %d (%d B)\n", result.RetainedCount, result.RetainedSize)
-	fmt.Printf("  Evict:   %d (%d B)\n", result.EvictedCount, result.EvictedSize)
+	log.Info("  Live:    %d (%s)", result.OriginalCount, oci.FormatSize(result.OriginalSize))
+	log.Info("  Keep:    %d (%s)", result.RetainedCount, oci.FormatSize(result.RetainedSize))
+	log.Info("  Evict:   %d (%s)", result.EvictedCount, oci.FormatSize(result.EvictedSize))
 
 	if result.EvictedCount == 0 {
 		log.Success("No packages to clean.")
@@ -89,7 +89,7 @@ func runGC(cmd *cobra.Command, args []string) error {
 	if gcDryRun {
 		log.Warning("DRY RUN: Evicting hashes:")
 		for _, key := range result.EvictedKeys {
-			fmt.Printf("  - %s\n", key)
+			log.Info("  - %s", key)
 		}
 		return nil
 	}

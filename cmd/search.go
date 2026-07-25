@@ -93,7 +93,7 @@ func runSearch(cmd *cobra.Command, args []string) error {
 	}
 
 	for _, m := range matched {
-		fmt.Printf("  - %-32s (%s) [Size: %s, Added: %s]\n",
+		log.Info("  - %-32s (%s) [Size: %s, Added: %s]",
 			m.item.Name,
 			m.hash,
 			oci.FormatSize(m.item.NarSize),

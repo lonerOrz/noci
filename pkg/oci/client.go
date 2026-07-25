@@ -22,20 +22,6 @@ import (
 	"golang.org/x/term"
 )
 
-type OCIManifest struct {
-	SchemaVersion int               `json:"schemaVersion"`
-	MediaType     string            `json:"mediaType"`
-	Config        Descriptor        `json:"config"`
-	Layers        []Descriptor      `json:"layers"`
-	Annotations   map[string]string `json:"annotations,omitempty"`
-}
-
-type Descriptor struct {
-	MediaType string `json:"mediaType"`
-	Digest    string `json:"digest"`
-	Size      int64  `json:"size"`
-}
-
 type Client struct {
 	registry      string
 	repo          string
@@ -137,7 +123,7 @@ func (c *Client) getOciToken(ctx context.Context, actions string) (string, error
 	defer c.tokenMu.Unlock()
 
 	// GHCR tokens expire in ~5 min; cache for 4 min to ensure fresh token on retry
-	const tokenCacheTTL = 4 * time.Minute
+	const tokenCacheTTL = DefaultTokenCacheTTL
 	if actions == "pull" {
 		if c.ociTokenPull != "" && time.Since(c.pullFetchTime) < tokenCacheTTL {
 			return c.ociTokenPull, nil
@@ -264,7 +250,7 @@ func (c *Client) doWithRetry(ctx context.Context, method, url, token, contentTyp
 }
 
 func (c *Client) FetchManifest(ctx context.Context, tag string) (*OCIManifest, error) {
-	resp, err := c.Request(ctx, "GET", "/manifests/"+tag, nil, "application/vnd.oci.image.manifest.v1+json")
+	resp, err := c.Request(ctx, "GET", "/manifests/"+tag, nil, MediaTypeImageManifest)
 	if err != nil {
 		return nil, err
 	}
@@ -317,7 +303,7 @@ func (c *Client) PushManifest(ctx context.Context, tag string, manifest *OCIMani
 		return err
 	}
 
-	resp, err := c.Request(ctx, "PUT", "/manifests/"+tag, bytes.NewReader(data), "application/vnd.oci.image.manifest.v1+json")
+	resp, err := c.Request(ctx, "PUT", "/manifests/"+tag, bytes.NewReader(data), MediaTypeImageManifest)
 	if err != nil {
 		return err
 	}
@@ -331,7 +317,7 @@ func (c *Client) PushManifest(ctx context.Context, tag string, manifest *OCIMani
 }
 
 func (c *Client) CheckCacheStatus(ctx context.Context, tag string) (exists bool, isEvicted bool) {
-	resp, err := c.Request(ctx, "HEAD", "/manifests/"+tag, nil, "application/vnd.oci.image.manifest.v1+json")
+	resp, err := c.Request(ctx, "HEAD", "/manifests/"+tag, nil, MediaTypeImageManifest)
 	if err != nil || resp.StatusCode != http.StatusOK {
 		if resp != nil {
 			resp.Body.Close()
@@ -351,7 +337,7 @@ func (c *Client) CheckCacheStatus(ctx context.Context, tag string) (exists bool,
 }
 
 func (c *Client) ManifestExists(ctx context.Context, tag string) (bool, string) {
-	resp, err := c.Request(ctx, "HEAD", "/manifests/"+tag, nil, "application/vnd.oci.image.manifest.v1+json")
+	resp, err := c.Request(ctx, "HEAD", "/manifests/"+tag, nil, MediaTypeImageManifest)
 	if err != nil {
 		return false, ""
 	}
@@ -478,12 +464,8 @@ func (c *Client) fallbackUntagManifest(ctx context.Context, tag string) error {
 	// immediately unbinding the NAR Manifest and leaving it untagged.
 	dummyManifest := OCIManifest{
 		SchemaVersion: 2,
-		MediaType:     "application/vnd.oci.image.manifest.v1+json",
-		Config: Descriptor{
-			MediaType: "application/vnd.noci.dummy.config.v1+json",
-			Size:      0,
-			Digest:    "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-		},
+		MediaType:     MediaTypeImageManifest,
+		Config:        DefaultEmptyConfigDescriptor(),
 		Annotations: map[string]string{
 			"org.nix.evicted": "true",
 		},
@@ -580,12 +562,8 @@ func (c *Client) PushIndex(ctx context.Context, idx *CacheIndex) error {
 
 	indexManifest := OCIManifest{
 		SchemaVersion: 2,
-		MediaType:     "application/vnd.oci.image.manifest.v1+json",
-		Config: Descriptor{
-			MediaType: "application/vnd.noci.index.config.v1+json",
-			Size:      0,
-			Digest:    "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-		},
+		MediaType:     MediaTypeImageManifest,
+		Config:        DefaultEmptyConfigDescriptor(),
 		Layers: []Descriptor{
 			{
 				MediaType: "application/vnd.noci.index.layer.v1+zstd",
@@ -627,7 +605,7 @@ func (c *Client) UploadBlob(ctx context.Context, filePath, sha256Hex, descriptio
 	}
 	size = stat.Size()
 
-	headCtx, headCancel := context.WithTimeout(ctx, 30*time.Second)
+	headCtx, headCancel := context.WithTimeout(ctx, DefaultHTTPTimeout)
 	defer headCancel()
 	if headResp, headErr := c.Request(headCtx, "HEAD", "/blobs/"+digest, nil, ""); headErr == nil {
 		headResp.Body.Close()

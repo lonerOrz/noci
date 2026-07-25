@@ -75,7 +75,7 @@ func runRepair(cmd *cobra.Command, args []string) error {
 	if repairDryRun {
 		log.Warning("DRY RUN: Would repair these entries:")
 		for _, hash := range candidateHashes {
-			fmt.Printf("  - %s\n", hash)
+			log.Info("  - %s", hash)
 		}
 		return nil
 	}

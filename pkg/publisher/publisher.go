@@ -180,12 +180,8 @@ func (p *Publisher) publishToRegistry(ctx context.Context, client *oci.Client, i
 		)
 		pubManifest := oci.OCIManifest{
 			SchemaVersion: 2,
-			MediaType:     "application/vnd.oci.image.manifest.v1+json",
-			Config: oci.Descriptor{
-				MediaType: "application/vnd.oci.image.config.v1+json",
-				Size:      0,
-				Digest:    "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-			},
+			MediaType:     oci.MediaTypeImageManifest,
+			Config:        oci.DefaultEmptyConfigDescriptor(),
 			Annotations: map[string]string{
 				"org.nix.public_key": publicKeyStr,
 			},
@@ -386,12 +382,8 @@ func (p *Publisher) publishToRegistry(ctx context.Context, client *oci.Client, i
 			}
 			manifest := oci.OCIManifest{
 				SchemaVersion: 2,
-				MediaType:     "application/vnd.oci.image.manifest.v1+json",
-				Config: oci.Descriptor{
-					MediaType: "application/vnd.oci.image.config.v1+json",
-					Size:      0,
-					Digest:    "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-				},
+				MediaType:     oci.MediaTypeImageManifest,
+				Config:        oci.DefaultEmptyConfigDescriptor(),
 				Layers: []oci.Descriptor{
 					{
 						MediaType: layerMediaType,

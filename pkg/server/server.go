@@ -101,7 +101,7 @@ func NewServer(registry, repo, token, addr, upstream, authKey string, rateLimit 
 }
 
 func (s *Server) Start(ctx context.Context) error {
-	warmCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	warmCtx, cancel := context.WithTimeout(ctx, oci.DefaultHTTPTimeout)
 	if exists, digest := s.client.ManifestExists(warmCtx, "noci-index"); exists {
 		s.lastDigest = digest
 	}
@@ -113,7 +113,7 @@ func (s *Server) Start(ctx context.Context) error {
 	cancel()
 
 	s.StartPreflightProbe()
-	go s.startActiveSyncLoop(ctx, 30*time.Second)
+	go s.startActiveSyncLoop(ctx, oci.DefaultActiveSyncPeriod)
 	go s.startCleanupLoop(ctx)
 
 	mux := http.NewServeMux()
@@ -187,7 +187,7 @@ func (s *Server) startActiveSyncLoop(ctx context.Context, interval time.Duration
 			if remoteDigest != "" && remoteDigest != currentDigest {
 				log.Info("Detected remote OCI index update (%s -> %s). Synchronizing...", shortDigest(currentDigest), shortDigest(remoteDigest))
 
-				syncCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+				syncCtx, cancel := context.WithTimeout(ctx, oci.DefaultHTTPTimeout)
 				if err := s.RefreshIndex(syncCtx); err != nil {
 					log.Warning("Background sync index failed: %v", err)
 				} else {

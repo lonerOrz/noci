@@ -8,6 +8,7 @@ import (
 	"noci/pkg/log"
 	"noci/pkg/nix"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -138,7 +139,10 @@ func (cf *CommonFlags) Resolve() (OCIConfig, error) {
 		repo = os.Getenv("GITHUB_REPOSITORY")
 	}
 	if repo == "" {
-		return OCIConfig{}, fmt.Errorf("repository is required (specify via --repo or NOCI_REPO/GITHUB_REPOSITORY env)")
+		repo = autoDetectGitRepo()
+	}
+	if repo == "" {
+		return OCIConfig{}, fmt.Errorf("repository is required (auto-detection failed; specify via --repo or NOCI_REPO)")
 	}
 
 	token := os.Getenv("NOCI_TOKEN")
@@ -147,6 +151,9 @@ func (cf *CommonFlags) Resolve() (OCIConfig, error) {
 	}
 	if token == "" {
 		token = os.Getenv("GH_TOKEN")
+	}
+	if token == "" {
+		token = readGhCLIToken()
 	}
 	if token == "" {
 		token = readDockerConfigToken(registry)
@@ -216,6 +223,50 @@ func readDockerConfigToken(registry string) string {
 		return ""
 	}
 	return parts[1]
+}
+
+// autoDetectGitRepo extracts owner/repo from local Git origin remote.
+func autoDetectGitRepo() string {
+	cmd := exec.Command("git", "remote", "get-url", "origin")
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	raw := strings.TrimSpace(string(out))
+	if strings.HasSuffix(raw, ".git") {
+		raw = strings.TrimSuffix(raw, ".git")
+	}
+	// SSH: git@github.com:owner/repo.git
+	if idx := strings.LastIndex(raw, ":"); idx != -1 && !strings.Contains(raw[idx:], "/") {
+		return raw[idx+1:]
+	}
+	// HTTPS: https://github.com/owner/repo
+	if idx := strings.Index(raw, "github.com/"); idx != -1 {
+		return raw[idx+len("github.com/"):]
+	}
+	return ""
+}
+
+// readGhCLIToken reads authentication token from GitHub CLI hosts config.
+func readGhCLIToken() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	data, err := os.ReadFile(filepath.Join(home, ".config", "gh", "hosts.yml"))
+	if err != nil {
+		return ""
+	}
+	var cfg map[string]struct {
+		OauthToken string `yaml:"oauth_token"`
+	}
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return ""
+	}
+	if gh, ok := cfg["github.com"]; ok && gh.OauthToken != "" {
+		return gh.OauthToken
+	}
+	return ""
 }
 
 // resolveHashes resolves input arguments to 32-char Nix hashes.

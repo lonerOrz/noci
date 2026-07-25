@@ -319,7 +319,7 @@ func (s *Server) handleNar(w http.ResponseWriter, r *http.Request, filename stri
 }
 
 func (s *Server) streamBlob(w http.ResponseWriter, r *http.Request, digest string) {
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
+	ctx, cancel := context.WithTimeout(r.Context(), oci.DefaultStreamTimeout)
 	defer cancel()
 
 	resp, err := s.client.RawRequest(ctx, "GET", "/blobs/"+digest, nil, "")
