@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
+	"net/http/httputil"
 	"noci/dist"
 	"noci/pkg/log"
 	"noci/pkg/oci"
@@ -248,9 +250,49 @@ func (s *Server) proxyToUpstream(w http.ResponseWriter, r *http.Request, path st
 		return
 	}
 
+	// Build ordered list of all upstream proxies (primary first, then extras).
+	proxies := make([]*httputil.ReverseProxy, 0, 1+len(s.upstreamExtras))
 	if s.upstreamProxy != nil {
-		r.URL.Path = "/" + path
-		s.upstreamProxy.ServeHTTP(w, r)
+		proxies = append(proxies, s.upstreamProxy)
+	}
+	proxies = append(proxies, s.upstreamExtras...)
+
+	for i, proxy := range proxies {
+		// Use ResponseRecorder to intercept status code before committing to client.
+		// 404 responses are tiny (bytes), so buffering is negligible.
+		// Non-404 responses are copied to the real writer; for large NAR blobs this
+		// adds a small memory cost but keeps the fallback logic simple and correct.
+		rec := httptest.NewRecorder()
+		reqClone := r.Clone(r.Context())
+		reqClone.URL.Path = "/" + path
+
+		proxy.ServeHTTP(rec, reqClone)
+
+		if rec.Code != http.StatusNotFound {
+			s.cb.RecordSuccess()
+			// Replay buffered response to the real client.
+			for k, vv := range rec.Result().Header {
+				if isHopByHopHeader(k) {
+					continue
+				}
+				for _, v := range vv {
+					w.Header().Add(k, v)
+				}
+			}
+			w.WriteHeader(rec.Code)
+			_, _ = w.Write(rec.Body.Bytes())
+			return
+		}
+
+		if i < len(proxies)-1 {
+			log.Debug("[noci-proxy] Upstream #%d returned 404 for %s, trying next...", i+1, path)
+		}
+	}
+
+	// All proxies returned 404 — fall back to direct HTTP fetch.
+	if s.upstream == "" {
+		s.cb.RecordFailure()
+		http.NotFound(w, r)
 		return
 	}
 
