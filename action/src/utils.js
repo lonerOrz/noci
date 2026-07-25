@@ -1,6 +1,6 @@
 const fs = require("fs");
 
-function writeMultiline(filePath, key, value) {
+function writeLine(filePath, key, value) {
   if (value.includes("\n")) {
     const delim = "NOCI_EOF";
     fs.appendFileSync(filePath, `${key}<<${delim}\n${value}\n${delim}\n`);
@@ -21,11 +21,15 @@ module.exports = {
   },
 
   saveState(key, value) {
-    writeMultiline(process.env.GITHUB_STATE, `noci-state-${key}`, value);
+    writeLine(process.env.GITHUB_STATE, `noci-state-${key}`, value);
+  },
+
+  getState(key) {
+    return process.env[`STATE_noci-state-${key}`];
   },
 
   exportVariable(key, value) {
-    writeMultiline(process.env.GITHUB_ENV, key, value);
+    writeLine(process.env.GITHUB_ENV, key, value);
   },
 
   exportOutput(key, value) {
@@ -35,9 +39,5 @@ module.exports = {
   fail(msg) {
     console.error(`[noci-action-error] ${msg}`);
     process.exit(1);
-  },
-
-  getState(key) {
-    return process.env[`STATE_noci-state-${key}`];
   },
 };
