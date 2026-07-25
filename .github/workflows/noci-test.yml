@@ -33,6 +33,13 @@ jobs:
           signing-key: ${{ secrets.NOCI_SIGNING_KEY }}
           token: ${{ secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
 
+      - name: Debug token source
+        run: |
+          echo "GITHUB_EVENT_NAME=${{ github.event_name }}"
+          echo "GH_TOKEN secret set: ${{ secrets.GH_TOKEN != '' }}"
+          echo "NOCI_TOKEN env set: ${NOCI_TOKEN:+yes}"
+          gh auth status 2>&1 || true
+
       - name: Build Local Dummy (Ensure Hook Triggers)
         run: |
           nix build --impure --no-link --expr 'derivation { name = "test-${{ github.sha }}"; system = "x86_64-linux"; builder = "/bin/sh"; args = [ "-c" "echo ${{ github.sha }} > $out" ]; }'
