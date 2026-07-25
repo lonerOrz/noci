@@ -50,8 +50,14 @@ jobs:
 
       - name: Build and Time Upload Real ISO
         run: |
+          echo "=== Token Debug ==="
+          echo "NOCI_TOKEN length: ${#NOCI_TOKEN}"
+          echo "NOCI_REPO: ${NOCI_REPO}"
+          echo "NOCI_REGISTRY: ${NOCI_REGISTRY}"
+          echo ""
+
           ISO_PATH=$(nix build github:lonerOrz/loneros-nixos#packages.x86_64-linux.iso --print-out-paths --no-link -L)
 
           nix path-info -sh "$ISO_PATH"
 
-          go run . push "$ISO_PATH" --profile
+          NOCI_SIGNING_KEY="$(cat /tmp/noci-test-secret)" go run . push "$ISO_PATH" --profile 2>&1
