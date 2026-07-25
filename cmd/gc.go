@@ -6,7 +6,6 @@ import (
 	"noci/pkg/gc"
 	"noci/pkg/log"
 	"noci/pkg/oci"
-	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -54,25 +53,17 @@ func runGC(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to parse grace-period: %w", err)
 	}
 
-	client := oci.NewClient(cfg.Registry, cfg.Repo, cfg.Token)
-	index, err := client.FetchIndex(ctx)
+	inputHashes, err := config.ResolveHashes(ctx, args, false)
 	if err != nil {
-		return fmt.Errorf("failed to fetch index: %w", err)
+		return err
 	}
 
-	engine := gc.NewEngine(index, dur)
-	engine.SetKeepVersions(gcKeepVersions)
-	var result *gc.Result
+	client := oci.NewClient(cfg.Registry, cfg.Repo, cfg.Token)
+	runner := gc.NewRunner(client, dur, gcKeepVersions, gcPhysicalSweep, gcDryRun)
 
-	if len(args) > 0 {
-		inputHashes, err := config.ResolveHashes(ctx, args, false)
-		if err != nil {
-			return err
-		}
-		log.Action("Targeted eviction resolved to %d input hashes.", len(inputHashes))
-		result = engine.CascadeEvict(inputHashes)
-	} else {
-		result = engine.Sweep(time.Now(), maxBytes)
+	result, err := runner.Run(ctx, maxBytes, inputHashes)
+	if err != nil {
+		return err
 	}
 
 	log.Info("GC Summary:")
@@ -91,52 +82,6 @@ func runGC(cmd *cobra.Command, args []string) error {
 			log.Info("  - %s", key)
 		}
 		return nil
-	}
-
-	type blobSweepInfo struct {
-		key    string
-		digest string
-	}
-	var sweepList []blobSweepInfo
-	for _, key := range result.EvictedKeys {
-		if entry, exists := index.Entries[key]; exists {
-			sweepList = append(sweepList, blobSweepInfo{
-				key:    key,
-				digest: entry.NarDigest,
-			})
-		}
-	}
-
-	engine.Apply(result)
-
-	log.Action("Updating OCI state...")
-	if err := client.PushIndex(ctx, index); err != nil {
-		return fmt.Errorf("failed to push updated index: %w", err)
-	}
-
-	if gcPhysicalSweep && len(sweepList) > 0 {
-		log.Action("Physically pruning evicted manifests concurrently (8 workers)...")
-		sem := make(chan struct{}, 8)
-		var wg sync.WaitGroup
-
-		for _, sweep := range sweepList {
-			sem <- struct{}{}
-			wg.Add(1)
-
-			go func(key string) {
-				defer func() {
-					<-sem
-					wg.Done()
-				}()
-				log.Action("Pruning physical manifest tag: %s", key)
-				if err := client.DeleteManifest(ctx, key); err != nil {
-					log.Warning("Failed to prune physical manifest tag %s: %v", key, err)
-				} else {
-					log.Success("Successfully pruned physical manifest tag: %s", key)
-				}
-			}(sweep.key)
-		}
-		wg.Wait()
 	}
 
 	log.Success("GC completed.")

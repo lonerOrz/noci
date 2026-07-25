@@ -9,8 +9,8 @@ import (
 
 // FakeRunner is a test double providing in-memory Nix store responses.
 type FakeRunner struct {
-	Closures  map[string][]string
-	PathInfos map[string]PathInfo
+	Closures   map[string][]string
+	PathInfos  map[string]PathInfo
 	BuildPaths []string
 	EvalPath   string
 
