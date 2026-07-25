@@ -95,6 +95,16 @@ type Publisher struct {
 	Profile      bool
 	cache        *ExportCache
 	runner       nix.Runner
+	logger       log.Logger
+}
+
+// SetLogger replaces the default stderr logger.
+func (p *Publisher) SetLogger(l log.Logger) {
+	if l == nil {
+		p.logger = log.NopLogger{}
+	} else {
+		p.logger = l
+	}
 }
 
 func NewPublisher(clients []*oci.Client, signer *nix.Signer, skipUpstream bool, comp string, compLevel int, jobs int) *Publisher {
@@ -113,6 +123,7 @@ func NewPublisher(clients []*oci.Client, signer *nix.Signer, skipUpstream bool, 
 		jobs:         jobs,
 		cache:        NewExportCache(),
 		runner:       nix.DefaultRunner,
+		logger:       log.DefaultLogger{},
 	}
 }
 
@@ -133,7 +144,7 @@ func (p *Publisher) Publish(ctx context.Context, inputPaths []string) error {
 		return p.publishToRegistry(ctx, p.clients[0], inputPaths)
 	}
 
-	log.Info("Pushing to %d registries...", len(p.clients))
+	p.logger.Info("Pushing to %d registries...", len(p.clients))
 
 	var wg sync.WaitGroup
 	errCh := make(chan error, len(p.clients))
@@ -143,10 +154,10 @@ func (p *Publisher) Publish(ctx context.Context, inputPaths []string) error {
 		go func(c *oci.Client) {
 			defer wg.Done()
 			if err := p.publishToRegistry(ctx, c, inputPaths); err != nil {
-				log.Warning("Push to registry failed: %v", err)
+				p.logger.Warning("Push to registry failed: %v", err)
 				errCh <- err
 			} else {
-				log.Success("Push to registry completed.")
+				p.logger.Success("Push to registry completed.")
 			}
 		}(client)
 	}
@@ -162,7 +173,7 @@ func (p *Publisher) Publish(ctx context.Context, inputPaths []string) error {
 		return fmt.Errorf("all registries failed: %v", errs)
 	}
 	if len(errs) > 0 {
-		log.Warning("%d registries failed, %d succeeded.", len(errs), len(p.clients)-len(errs))
+		p.logger.Warning("%d registries failed, %d succeeded.", len(errs), len(p.clients)-len(errs))
 	}
 	return nil
 }
@@ -174,7 +185,7 @@ func (p *Publisher) publishToRegistry(ctx context.Context, store oci.Store, inpu
 
 	t0 = time.Now()
 	if err := p.stageEnsurePublicKey(ctx, store); err != nil {
-		log.Warning("Failed to push public key manifest: %v", err)
+		p.logger.Warning("Failed to push public key manifest: %v", err)
 	}
 	t1 = time.Now()
 
@@ -185,13 +196,13 @@ func (p *Publisher) publishToRegistry(ctx context.Context, store oci.Store, inpu
 
 	if len(uploadList) == 0 {
 		if p.Profile {
-			log.Info("[profile] Publish pipeline:")
-			log.Info("  - Sign/PushManifest: %v", t1.Sub(t0))
-			log.Info("  - FetchIndex:        %v", t2.Sub(t1))
-			log.Info("  - DiffCheck:         %v", t3.Sub(t2))
-			log.Info("  - Total:             %v", time.Since(totalStart))
+			p.logger.Info("[profile] Publish pipeline:")
+			p.logger.Info("  - Sign/PushManifest: %v", t1.Sub(t0))
+			p.logger.Info("  - FetchIndex:        %v", t2.Sub(t1))
+			p.logger.Info("  - DiffCheck:         %v", t3.Sub(t2))
+			p.logger.Info("  - Total:             %v", time.Since(totalStart))
 		}
-		log.Success("All packages are already cached!")
+		p.logger.Success("All packages are already cached!")
 		return nil
 	}
 
@@ -207,16 +218,16 @@ func (p *Publisher) publishToRegistry(ctx context.Context, store oci.Store, inpu
 	t5 = time.Now()
 
 	if p.Profile {
-		log.Info("[profile] Publish pipeline:")
-		log.Info("  - Sign/PushManifest: %v", t1.Sub(t0))
-		log.Info("  - FetchIndex:        %v", t2.Sub(t1))
-		log.Info("  - DiffCheck:         %v", t3.Sub(t2))
-		log.Info("  - Upload+PushManifest: %v", t4.Sub(t3))
-		log.Info("  - LateMerge:         %v", t5.Sub(t4))
-		log.Info("  - Total:             %v", time.Since(totalStart))
+		p.logger.Info("[profile] Publish pipeline:")
+		p.logger.Info("  - Sign/PushManifest: %v", t1.Sub(t0))
+		p.logger.Info("  - FetchIndex:        %v", t2.Sub(t1))
+		p.logger.Info("  - DiffCheck:         %v", t3.Sub(t2))
+		p.logger.Info("  - Upload+PushManifest: %v", t4.Sub(t3))
+		p.logger.Info("  - LateMerge:         %v", t5.Sub(t4))
+		p.logger.Info("  - Total:             %v", time.Since(totalStart))
 	}
 
-	log.Success("Cached %d packages successfully.", len(uploadList))
+	p.logger.Success("Cached %d packages successfully.", len(uploadList))
 	return nil
 }
 
@@ -253,7 +264,7 @@ func (p *Publisher) stageDiffIndex(ctx context.Context, store oci.Store, inputPa
 		*tFetch = time.Now()
 	}
 
-	log.Action("Evaluating closure for %d paths...", len(inputPaths))
+	p.logger.Action("Evaluating closure for %d paths...", len(inputPaths))
 	closure, err := p.runner.GetClosure(ctx, inputPaths)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get closure: %w", err)
@@ -302,7 +313,7 @@ func (p *Publisher) stageDiffIndex(ctx context.Context, store oci.Store, inputPa
 	for res := range resultChan {
 		if res.exists {
 			if err := store.RepairIndexEntry(ctx, res.hash, index); err != nil {
-				log.Warning("Failed to repair index entry for %s: %v", res.hash, err)
+				p.logger.Warning("Failed to repair index entry for %s: %v", res.hash, err)
 				uncachedPaths = append(uncachedPaths, res.path)
 			} else {
 				repairCount++
@@ -316,7 +327,7 @@ func (p *Publisher) stageDiffIndex(ctx context.Context, store oci.Store, inputPa
 		if err := store.PushIndex(ctx, index); err != nil {
 			return nil, fmt.Errorf("failed to push repaired index: %w", err)
 		}
-		log.Success("Repaired %d stale index entries.", repairCount)
+		p.logger.Success("Repaired %d stale index entries.", repairCount)
 	}
 
 	if len(uncachedPaths) == 0 {
@@ -354,7 +365,7 @@ func (p *Publisher) stageDiffIndex(ctx context.Context, store oci.Store, inputPa
 	}
 
 	if skippedUpstreamCount > 0 {
-		log.Success("Skipped %d upstream-cached paths.", skippedUpstreamCount)
+		p.logger.Success("Skipped %d upstream-cached paths.", skippedUpstreamCount)
 	}
 
 	// Sort by size descending so large files start first
@@ -371,7 +382,7 @@ func (p *Publisher) stageDiffIndex(ctx context.Context, store oci.Store, inputPa
 
 // stageUploadConcurrently exports NARs, uploads blobs, and pushes manifests in parallel.
 func (p *Publisher) stageUploadConcurrently(ctx context.Context, store oci.Store, uploadList []nix.PathInfo) ([]uploadResult, error) {
-	log.Info("Found %d new paths. Uploading concurrently...", len(uploadList))
+	p.logger.Info("Found %d new paths. Uploading concurrently...", len(uploadList))
 
 	outcomeChan := make(chan uploadResult, len(uploadList))
 	concurrency := p.jobs
@@ -416,8 +427,8 @@ func (p *Publisher) stageUploadConcurrently(ctx context.Context, store oci.Store
 			}
 
 			layerMediaType := oci.MediaTypeNixLayerGzip
-			if p.comp == "zstd" {
-				layerMediaType = oci.MediaTypeNixLayerZstd
+			if c, err := nix.GetCompressor(p.comp); err == nil {
+				layerMediaType = c.MediaType()
 			}
 			manifest := oci.OCIManifest{
 				SchemaVersion: 2,
@@ -483,7 +494,7 @@ func (p *Publisher) stageMergeIndex(ctx context.Context, store oci.Store, result
 
 // publishSingle handles export, upload, signing, and narinfo generation for one store path.
 func (p *Publisher) publishSingle(ctx context.Context, store oci.Store, info nix.PathInfo) (uploadResult, error) {
-	log.Action("Processing: %s", info.Path)
+	p.logger.Action("Processing: %s", info.Path)
 
 	exportStart := time.Now()
 
@@ -507,9 +518,9 @@ func (p *Publisher) publishSingle(ctx context.Context, store oci.Store, info nix
 	uploadDuration := time.Since(exportStart)
 
 	if p.Profile {
-		log.Info("[profile] Path: %s (%s)", nix.GetPathName(info.Path), oci.FormatSize(uploadSize))
-		log.Info("  - Export+compress: %v", exportDuration)
-		log.Info("  - Total (incl upload): %v", uploadDuration)
+		p.logger.Info("[profile] Path: %s (%s)", nix.GetPathName(info.Path), oci.FormatSize(uploadSize))
+		p.logger.Info("  - Export+compress: %v", exportDuration)
+		p.logger.Info("  - Total (incl upload): %v", uploadDuration)
 	}
 
 	fileHash := strings.TrimPrefix(digest, "sha256:")

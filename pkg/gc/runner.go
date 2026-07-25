@@ -17,6 +17,16 @@ type Runner struct {
 	keepVersions  int
 	physicalSweep bool
 	dryRun        bool
+	logger        log.Logger
+}
+
+// SetLogger replaces the default stderr logger.
+func (r *Runner) SetLogger(l log.Logger) {
+	if l == nil {
+		r.logger = log.NopLogger{}
+	} else {
+		r.logger = l
+	}
 }
 
 func NewRunner(store oci.Store, gracePeriod time.Duration, keepVersions int, physicalSweep, dryRun bool) *Runner {
@@ -26,6 +36,7 @@ func NewRunner(store oci.Store, gracePeriod time.Duration, keepVersions int, phy
 		keepVersions:  keepVersions,
 		physicalSweep: physicalSweep,
 		dryRun:        dryRun,
+		logger:        log.DefaultLogger{},
 	}
 }
 
@@ -42,7 +53,7 @@ func (r *Runner) Run(ctx context.Context, maxSize int64, targets []string) (*Res
 
 	var result *Result
 	if len(targets) > 0 {
-		log.Action("Targeted eviction resolved to %d input hashes.", len(targets))
+		r.logger.Action("Targeted eviction resolved to %d input hashes.", len(targets))
 		result = engine.CascadeEvict(targets)
 	} else {
 		result = engine.Sweep(time.Now(), maxSize)
@@ -58,7 +69,7 @@ func (r *Runner) Run(ctx context.Context, maxSize int64, targets []string) (*Res
 
 	engine.Apply(result)
 
-	log.Action("Updating OCI state...")
+	r.logger.Action("Updating OCI state...")
 	if err := r.store.PushIndex(ctx, index); err != nil {
 		return nil, fmt.Errorf("failed to push updated index: %w", err)
 	}
@@ -71,7 +82,7 @@ func (r *Runner) Run(ctx context.Context, maxSize int64, targets []string) (*Res
 }
 
 func (r *Runner) physicalDelete(ctx context.Context, keys []string) {
-	log.Action("Physically pruning evicted manifests concurrently (8 workers)...")
+	r.logger.Action("Physically pruning evicted manifests concurrently (8 workers)...")
 	sem := make(chan struct{}, 8)
 	var wg sync.WaitGroup
 
@@ -84,11 +95,11 @@ func (r *Runner) physicalDelete(ctx context.Context, keys []string) {
 				<-sem
 				wg.Done()
 			}()
-			log.Action("Pruning physical manifest tag: %s", tag)
+			r.logger.Action("Pruning physical manifest tag: %s", tag)
 			if err := r.store.DeleteManifest(ctx, tag); err != nil {
-				log.Warning("Failed to prune physical manifest tag %s: %v", tag, err)
+				r.logger.Warning("Failed to prune physical manifest tag %s: %v", tag, err)
 			} else {
-				log.Success("Successfully pruned physical manifest tag: %s", tag)
+				r.logger.Success("Successfully pruned physical manifest tag: %s", tag)
 			}
 		}(key)
 	}

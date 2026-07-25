@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
+	"noci/pkg/log"
 	"noci/pkg/nix"
 	"noci/pkg/oci"
 	"strings"
@@ -278,7 +279,7 @@ func TestStageDiffIndex_WithFakeRunner(t *testing.T) {
 	}
 
 	mock := newMockStore()
-	pub := &Publisher{runner: fakeNix, skipUpstream: false}
+	pub := &Publisher{runner: fakeNix, skipUpstream: false, logger: log.DefaultLogger{}}
 
 	uploadList, err := pub.stageDiffIndex(context.Background(), mock, []string{"/nix/store/0abc1234567890abc1234567890abc12-pkg"}, nil, nil)
 	if err != nil {
@@ -306,6 +307,7 @@ func TestPublishSingle_WithFakeRunner(t *testing.T) {
 		runner:  fakeNix,
 		comp:    "zstd",
 		Profile: false,
+		logger:  log.DefaultLogger{},
 	}
 
 	info := nix.PathInfo{

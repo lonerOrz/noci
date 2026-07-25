@@ -2,7 +2,6 @@ package nix
 
 import (
 	"bufio"
-	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -11,20 +10,17 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
-
-	"github.com/klauspost/compress/zstd"
 )
 
 // ExportAndCompress exports a store path and compresses it as a NAR archive.
 func ExportAndCompress(ctx context.Context, storePath string, comp string, concurrency int, level int) (tempFile string, fileHash string, fileSize int64, err error) {
-	ext := ".nar.gz"
-	if comp == "zstd" {
-		ext = ".nar.zst"
+	c, err := GetCompressor(comp)
+	if err != nil {
+		return "", "", 0, err
 	}
 
-	tmp, err := os.CreateTemp("", "noci-nar-*"+ext)
+	tmp, err := os.CreateTemp("", "noci-nar-*"+c.Extension())
 	if err != nil {
 		return "", "", 0, err
 	}
@@ -39,23 +35,7 @@ func ExportAndCompress(ctx context.Context, storePath string, comp string, concu
 	hashWriter := sha256.New()
 	multiWriter := io.MultiWriter(bufWriter, hashWriter)
 
-	var compressor io.WriteCloser
-	if comp == "zstd" {
-		if concurrency <= 0 {
-			concurrency = runtime.NumCPU() / 2
-			if concurrency < 1 {
-				concurrency = 1
-			} else if concurrency > 4 {
-				concurrency = 4
-			}
-		}
-		if level <= 0 {
-			level = 3
-		}
-		compressor, err = zstd.NewWriter(multiWriter, zstd.WithEncoderConcurrency(concurrency), zstd.WithEncoderLevel(zstd.EncoderLevel(level)))
-	} else {
-		compressor = gzip.NewWriter(multiWriter)
-	}
+	compressor, err := c.WrapWriter(multiWriter, concurrency, level)
 	if err != nil {
 		_ = tmp.Close()
 		_ = os.Remove(tmp.Name())
@@ -105,12 +85,7 @@ func ExportAndCompress(ctx context.Context, storePath string, comp string, concu
 }
 
 func GenerateNarInfo(storePath, narHash string, narSize int64, fileHash string, fileSize int64, refs []string, sigs []string, comp string) string {
-	ext := ".nar.gz"
-	compName := "gzip"
-	if comp == "zstd" {
-		ext = ".nar.zst"
-		compName = "zstd"
-	}
+	c, _ := GetCompressor(comp)
 
 	var refBasenames []string
 	for _, r := range refs {
@@ -119,8 +94,8 @@ func GenerateNarInfo(storePath, narHash string, narSize int64, fileHash string, 
 
 	lines := []string{
 		"StorePath: " + storePath,
-		"URL: nar/" + GetPathHash(storePath) + ext,
-		"Compression: " + compName,
+		"URL: nar/" + GetPathHash(storePath) + c.Extension(),
+		"Compression: " + c.Name(),
 		"FileHash: sha256:" + fileHash,
 		"FileSize: " + fmt.Sprintf("%d", fileSize),
 		"NarHash: " + narHash,
