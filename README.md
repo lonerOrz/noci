@@ -5,10 +5,11 @@ noci is a stateless Nix binary cache toolchain that leverages standard OCI conta
 ## Features
 
 - **push**: Intelligently analyzes dependency closures, automatically filters out existing or upstream-cached packages (supports Zstd/Gzip compression, adaptive multi-threaded compression).
-- **proxy**: A local HTTP proxy that transparently converts Nix fetch requests into OCI layer downloads, with support for TTL-based cache refreshing and upstream fallback. Structured request logging provides real-time visibility.
+- **proxy**: A local HTTP proxy that transparently converts Nix fetch requests into OCI layer downloads, with support for TTL-based cache refreshing and cascading upstream fallback. Structured request logging provides real-time visibility.
 - **search**: List or fuzzy-search cached packages by name, hash, store path, or Flake URI. Uses `nix eval --raw` for zero-build Flake resolution.
 - **gc**: Performs Mark-Sweep garbage collection on dependencies, supporting storage quotas (Max-Size), grace-period protection, and cascade eviction for targeted removal.
 - **pin/unpin**: Manually manages cache lifelines to protect critical environments from accidental deletion by the garbage collector.
+- **index repair**: Reconciles OCI manifests with the index, repairing stale or missing entries.
 
 ## Installation
 
@@ -27,7 +28,11 @@ Import the module in your `flake.nix` configuration:
 services.noci-proxy = {
   enable = true;
   repo = "username/repo";
-  tokenFile = "/path/to/token.env";
+  # registry = "ghcr.io";       # default
+  # port = 37515;                # default
+  # listen = "127.0.0.1";        # default
+  # upstream = "https://cache.nixos.org";  # default
+  tokenFile = "/path/to/token.env";  # file with NOCI_TOKEN=... or GITHUB_TOKEN=...
 };
 ```
 
@@ -48,7 +53,7 @@ export NOCI_SIGNING_KEY=$(cat secret.key)
 export GH_TOKEN="your_token"
 ```
 
-Token resolution: `NOCI_TOKEN` → `GITHUB_TOKEN` → `GH_TOKEN` → `~/.docker/config.json`.
+Token resolution: `NOCI_TOKEN` → `GITHUB_TOKEN` → `GH_TOKEN` → `gh auth token` → `~/.docker/config.json`.
 
 ### 3. Daily Operations
 
@@ -73,6 +78,10 @@ noci search github:owner/repo#package
 # Run garbage collection (5GB quota, cascade evict specific packages)
 noci gc --max-size 5GB --grace-period 6h --dry-run=false
 noci gc g5jggck6... hszsl3vn...   # cascade eviction
+
+# Repair index (reconcile OCI manifests with index)
+noci index repair --dry-run        # preview missing entries
+noci index repair                  # write repairs
 ```
 
 ## GitHub Actions Integration
@@ -94,6 +103,9 @@ jobs:
           repo: ${{ secrets.NOCI_REPO }}
           signing-key: ${{ secrets.NOCI_SIGNING_KEY }}
           token: ${{ secrets.GH_TOKEN }}
+          # registry: ghcr.io       # default
+          # skip-upstream: "true"    # default
+          # proxy-port: "0"          # random free port
 
       - run: nix build .#package
 ```
