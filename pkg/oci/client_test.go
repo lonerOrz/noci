@@ -265,7 +265,7 @@ func TestUploadBlobChunked_RetryAndSeek(t *testing.T) {
 	tmp.Write([]byte("test"))
 	tmp.Close()
 
-	digest, _, err := client.uploadBlobChunked(context.Background(), tmp.Name(), expectedSHA, "test-nar", &NoopProgressNotifier{})
+	digest, _, err := client.blobs.uploadBlobChunked(context.Background(), tmp.Name(), expectedSHA, "test-nar", &NoopProgressNotifier{})
 	if err != nil {
 		t.Fatalf("uploadBlobChunked: %v", err)
 	}
