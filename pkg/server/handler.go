@@ -176,10 +176,21 @@ func (s *Server) handlePublicKey(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(pubKey + "\n"))
 }
 
+// --- Catch-all for .narinfo paths (Go 1.26 rejects /{hash}.narinfo) ---
+
+func (s *Server) handleCatchAll(w http.ResponseWriter, r *http.Request) {
+	if strings.HasSuffix(r.URL.Path, ".narinfo") {
+		s.handleNarInfoRoute(w, r)
+		return
+	}
+	http.NotFound(w, r)
+}
+
 // --- Narinfo (cache lookup + URL rewrite) ---
 
 func (s *Server) handleNarInfoRoute(w http.ResponseWriter, r *http.Request) {
-	hash := r.PathValue("hash")
+	hash := strings.TrimSuffix(r.URL.Path, ".narinfo")
+	hash = strings.TrimPrefix(hash, "/")
 
 	content, found := s.cacheSvc.GetNarInfo(hash)
 	if !found {

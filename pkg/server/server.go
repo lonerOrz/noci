@@ -178,8 +178,10 @@ func (s *Server) setupMux() *http.ServeMux {
 	// Nix Cache protocol
 	mux.HandleFunc("GET /nix-cache-info", s.withMiddleware(s.HandleNixCacheInfo))
 	mux.HandleFunc("GET /public-key", s.withMiddleware(s.handlePublicKey))
-	mux.HandleFunc("GET /{hash}.narinfo", s.withMiddleware(s.handleNarInfoRoute))
 	mux.HandleFunc("GET /nar/{filename...}", s.withMiddleware(s.handleNarRoute))
+	// Catch-all for {hash}.narinfo — Go 1.26 ServeMux rejects /{hash}.narinfo
+	// because the wildcard doesn't end the segment. Static routes above take priority.
+	mux.HandleFunc("GET /{path}", s.withMiddleware(s.handleCatchAll))
 
 	// Management API
 	mux.HandleFunc("GET /healthz", s.withMiddleware(s.handleHealthz))
