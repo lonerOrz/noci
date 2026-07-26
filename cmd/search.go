@@ -1,9 +1,12 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
+	"noci/pkg/config"
 	"noci/pkg/log"
 	"noci/pkg/oci"
+	"os"
 	"sort"
 	"strings"
 
@@ -15,7 +18,11 @@ var searchFlags CommonFlags
 var searchCmd = &cobra.Command{
 	Use:   "search [query]",
 	Short: "Search or list packages cached in the OCI registry",
-	RunE:  runSearch,
+	Long: `List all cached packages or filter by name/hash substring. When a query
+is provided, it is first tried as a Nix hash or store path, then falls back
+to substring matching against package names and hashes.`,
+	Args: cobra.ArbitraryArgs,
+	RunE: runSearch,
 }
 
 func init() {
@@ -32,7 +39,7 @@ func runSearch(cmd *cobra.Command, args []string) error {
 	client := oci.NewClient(cfg.Registry, cfg.Repo, cfg.Token)
 	index, err := client.FetchIndex(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to fetch index: %w", err)
+		return fmt.Errorf("fetch index: %w", err)
 	}
 
 	type match struct {
@@ -51,7 +58,7 @@ func runSearch(cmd *cobra.Command, args []string) error {
 			matched = append(matched, match{hash: hash, item: entry})
 		}
 	} else {
-                resolved, err := resolveHashes(ctx, args, false)
+		resolved, err := config.ResolveHashes(ctx, args, false)
 		if err == nil && len(resolved) > 0 {
 			seen := make(map[string]bool)
 			for _, rh := range resolved {
@@ -86,6 +93,27 @@ func runSearch(cmd *cobra.Command, args []string) error {
 		return matched[i].item.Name < matched[j].item.Name
 	})
 
+	if jsonOutput {
+		type jsonEntry struct {
+			Hash  string `json:"hash"`
+			Name  string `json:"name"`
+			Size  int64  `json:"size"`
+			Added string `json:"added"`
+		}
+		out := make([]jsonEntry, len(matched))
+		for i, m := range matched {
+			out[i] = jsonEntry{
+				Hash:  m.hash,
+				Name:  m.item.Name,
+				Size:  m.item.NarSize,
+				Added: m.item.Added.Local().Format("2006-01-02T15:04:05Z07:00"),
+			}
+		}
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(out)
+	}
+
 	if query != "" {
 		log.Success("Found %d matching packages:", len(matched))
 	} else {
@@ -93,7 +121,7 @@ func runSearch(cmd *cobra.Command, args []string) error {
 	}
 
 	for _, m := range matched {
-		fmt.Printf("  - %-32s (%s) [Size: %s, Added: %s]\n",
+		log.Info("  - %-32s (%s) [Size: %s, Added: %s]",
 			m.item.Name,
 			m.hash,
 			oci.FormatSize(m.item.NarSize),

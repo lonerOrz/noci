@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io"
 	"noci/pkg/log"
@@ -10,26 +11,35 @@ import (
 	"noci/pkg/publisher"
 	"os"
 	"strings"
-	"sync"
 
 	"github.com/spf13/cobra"
 )
 
 var (
-	pushFlags           CommonFlags
-	pushKeyFile         string
-	pushCompression     string
+	pushFlags            CommonFlags
+	pushKeyFile          string
+	pushCompression      string
 	pushCompressionLevel int
-	pushSkipUpstream    bool
-	pushJobs            int
-	pushProfile         bool
-	pushRegistries      []string
+	pushSkipUpstream     bool
+	pushJobs             int
+	pushProfile          bool
+	pushRegistries       []string
 )
 
 var pushCmd = &cobra.Command{
 	Use:   "push [paths or targets...]",
 	Short: "Build local paths or targets and push to OCI registry",
-	RunE:  runPush,
+	Long: `Push one or more Nix store paths, flake targets, or derivation outputs
+to an OCI registry. Paths can be provided as arguments or via stdin.
+
+When a target is not a store path, it is built via 'nix build --no-link --json'
+before pushing. Stdin accepts JSON array, newline-delimited paths, or pipe from
+'--json' output.
+
+Signing is required for cache integrity. Provide a key via NOCI_SIGNING_KEY env
+var or --key-file flag.`,
+	Args: cobra.ArbitraryArgs,
+	RunE: runPush,
 }
 
 func init() {
@@ -46,12 +56,41 @@ func init() {
 func runPush(cmd *cobra.Command, args []string) error {
 	ctx := cmd.Context()
 
-	cfg, err := pushFlags.Resolve()
+	pushFlags.ExtraRegistries = pushRegistries
+	cfg, err := pushFlags.ResolveConfig()
 	if err != nil {
 		return err
 	}
 
-	var signer *nix.Signer
+	signer, err := resolveSigner()
+	if err != nil {
+		return err
+	}
+
+	inputPaths, err := resolveInputs(ctx, args)
+	if err != nil {
+		return err
+	}
+
+	comp := strings.ToLower(strings.TrimSpace(pushCompression))
+	if comp != "zstd" && comp != "gzip" {
+		return fmt.Errorf("unsupported compression: %q (use 'zstd' or 'gzip')", pushCompression)
+	}
+
+	clients := make([]*oci.Client, 0, len(cfg.Registries))
+	for _, e := range cfg.Registries {
+		client := oci.NewClient(e.Registry, e.Repo, e.Token)
+		client.Profile = pushProfile
+		clients = append(clients, client)
+	}
+
+	pub := publisher.NewPublisher(clients, signer, pushSkipUpstream, comp, pushCompressionLevel, pushJobs)
+	pub.Profile = pushProfile
+	return pub.Publish(ctx, inputPaths)
+}
+
+// resolveSigner loads the signing key from env or file.
+func resolveSigner() (*nix.Signer, error) {
 	signingKey := os.Getenv("NOCI_SIGNING_KEY")
 	keyFile := pushKeyFile
 	if keyFile == "" {
@@ -59,26 +98,21 @@ func runPush(cmd *cobra.Command, args []string) error {
 	}
 
 	if signingKey == "" && keyFile == "" {
-		return fmt.Errorf("signing key is required to guarantee cache integrity. " +
+		return nil, fmt.Errorf("signing key is required to guarantee cache integrity. " +
 			"Please specify your private key via the NOCI_SIGNING_KEY environment variable " +
 			"or the --key-file flag")
 	}
 
 	if signingKey != "" {
-		var err error
-		signer, err = nix.NewSignerFromKey(signingKey)
-		if err != nil {
-			return fmt.Errorf("failed to load signing key from NOCI_SIGNING_KEY: %w", err)
-		}
-	} else {
-		var err error
-		signer, err = nix.NewSigner(keyFile)
-		if err != nil {
-			return fmt.Errorf("failed to load signing key from file: %w", err)
-		}
+		return nix.NewSignerFromKey(signingKey)
 	}
+	return nix.NewSigner(keyFile)
+}
 
+// resolveInputs resolves CLI args and stdin into store paths.
+func resolveInputs(ctx context.Context, args []string) ([]string, error) {
 	var inputPaths []string
+
 	for _, arg := range args {
 		arg = strings.TrimSpace(arg)
 		if arg == "" {
@@ -89,7 +123,7 @@ func runPush(cmd *cobra.Command, args []string) error {
 			log.Action("Target %q does not look like a store path. Running `nix build %s --no-link --json`...", arg, arg)
 			buildPaths, err := nix.BuildTarget(ctx, arg)
 			if err != nil {
-				return fmt.Errorf("failed to build target %q: %w", arg, err)
+				return nil, fmt.Errorf("build target %q: %w", arg, err)
 			}
 			inputPaths = append(inputPaths, buildPaths...)
 		} else {
@@ -98,83 +132,39 @@ func runPush(cmd *cobra.Command, args []string) error {
 	}
 
 	if len(inputPaths) == 0 {
-		stdinBytes, err := io.ReadAll(os.Stdin)
-		if err == nil && len(stdinBytes) > 0 {
-			trimmed := strings.TrimSpace(string(stdinBytes))
-			if strings.HasPrefix(trimmed, "[") || strings.HasPrefix(trimmed, "{") {
-				paths, err := nix.ParseJSONBuildOutputs([]byte(trimmed))
-				if err == nil {
-					inputPaths = append(inputPaths, paths...)
-				}
-			} else {
-				scanner := bufio.NewScanner(strings.NewReader(trimmed))
-				for scanner.Scan() {
-					line := strings.TrimSpace(scanner.Text())
-					if line != "" {
-						inputPaths = append(inputPaths, line)
-					}
-				}
-			}
-		}
+		inputPaths = readStdinPaths()
 	}
 
 	if len(inputPaths) == 0 {
-		return fmt.Errorf("no paths or targets provided via arguments or stdin")
+		return nil, fmt.Errorf("no paths or targets provided via arguments or stdin")
 	}
 
-	comp := strings.ToLower(strings.TrimSpace(pushCompression))
-	if comp != "zstd" && comp != "gzip" {
-		return fmt.Errorf("unsupported compression: %q (use 'zstd' or 'gzip')", pushCompression)
+	return inputPaths, nil
+}
+
+// readStdinPaths reads store paths from stdin (JSON array or newline-delimited).
+func readStdinPaths() []string {
+	stdinBytes, err := io.ReadAll(os.Stdin)
+	if err != nil || len(stdinBytes) == 0 {
+		return nil
 	}
 
-	entries, err := ResolveRegistries(pushRegistries, cfg)
-	if err != nil {
-		return err
+	trimmed := strings.TrimSpace(string(stdinBytes))
+	if strings.HasPrefix(trimmed, "[") || strings.HasPrefix(trimmed, "{") {
+		paths, err := nix.ParseJSONBuildOutputs([]byte(trimmed))
+		if err != nil {
+			return nil
+		}
+		return paths
 	}
 
-	if len(entries) == 1 {
-		client := oci.NewClient(entries[0].Registry, entries[0].Repo, entries[0].Token)
-		client.Profile = pushProfile
-		pub := publisher.NewPublisher(client, signer, pushSkipUpstream, comp, pushCompressionLevel, pushJobs, nil)
-		pub.Profile = pushProfile
-		return pub.Publish(ctx, inputPaths)
+	var paths []string
+	scanner := bufio.NewScanner(strings.NewReader(trimmed))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line != "" {
+			paths = append(paths, line)
+		}
 	}
-
-	// Multi-registry: fan out in parallel with shared export cache
-	log.Info("Pushing to %d registries...", len(entries))
-	cache := publisher.NewExportCache()
-	defer cache.Cleanup()
-
-	var wg sync.WaitGroup
-	errCh := make(chan error, len(entries))
-	for _, entry := range entries {
-		wg.Add(1)
-		go func(e RegistryEntry) {
-			defer wg.Done()
-			client := oci.NewClient(e.Registry, e.Repo, e.Token)
-			client.Profile = pushProfile
-			pub := publisher.NewPublisher(client, signer, pushSkipUpstream, comp, pushCompressionLevel, pushJobs, cache)
-			pub.Profile = pushProfile
-			if err := pub.Publish(ctx, inputPaths); err != nil {
-				log.Warning("Push to %s/%s failed: %v", e.Registry, e.Repo, err)
-				errCh <- fmt.Errorf("%s/%s: %w", e.Registry, e.Repo, err)
-			} else {
-				log.Success("Push to %s/%s completed.", e.Registry, e.Repo)
-			}
-		}(entry)
-	}
-	wg.Wait()
-	close(errCh)
-
-	var errs []error
-	for e := range errCh {
-		errs = append(errs, e)
-	}
-	if len(errs) == len(entries) {
-		return fmt.Errorf("all registries failed: %v", errs)
-	}
-	if len(errs) > 0 {
-		log.Warning("%d registries failed, %d succeeded.", len(errs), len(entries)-len(errs))
-	}
-	return nil
+	return paths
 }

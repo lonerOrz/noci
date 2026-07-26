@@ -1,0 +1,37 @@
+[project]
+root-file = "flake.nix"
+
+[formatter.go]
+command = "gofmt"
+options = ["-w"]
+includes = ["*.go"]
+
+[formatter.nix]
+command = "nixfmt"
+includes = ["*.nix"]
+
+[formatter.prettier]
+command = "prettier"
+options = ["--write"]
+includes = [
+  "*.md",
+  "*.yaml",
+  "*.yml",
+  "*.js",
+  "*.json",
+  "*.html",
+  "*.css",
+]
+
+[formatter.sh]
+command = "shfmt"
+options = ["-w", "-s"]
+includes = ["*.sh"]
+
+[global]
+excludes = [
+  "*.lock",
+  "go.sum",
+  ".gitignore",
+  "dist/*",
+]

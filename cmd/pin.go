@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"noci/pkg/config"
 	"noci/pkg/log"
 	"noci/pkg/oci"
 
@@ -16,21 +17,21 @@ var (
 var pinCmd = &cobra.Command{
 	Use:   "pin [paths, targets, or 32-char hashes...]",
 	Short: "Pin specific packages/targets in the OCI cache to protect them from GC",
-	RunE:  runPin,
+	Long: `Mark one or more packages as pinned roots in the index. Pinned packages
+are excluded from garbage collection until their TTL expires.
+
+Accepts store paths, flake targets, or 32-char Nix hashes. Store paths and
+targets are resolved to hashes before pinning.`,
+	Args: cobra.MinimumNArgs(1),
+	RunE: runPin,
 }
 
 func init() {
 	pinFlags.Register(pinCmd)
 	pinCmd.Flags().StringVar(&pinTTL, "ttl", "30d", "Time to keep the package pinned (e.g., '30d', '24h', '0' for permanent)")
-
-	RootCmd.AddCommand(pinCmd)
 }
 
 func runPin(cmd *cobra.Command, args []string) error {
-	if len(args) == 0 {
-		return fmt.Errorf("no paths, targets, or hashes specified to pin")
-	}
-
 	ctx := cmd.Context()
 
 	cfg, err := pinFlags.Resolve()
@@ -38,13 +39,13 @@ func runPin(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	ttlSeconds, err := parseTTL(pinTTL)
+	ttlSeconds, err := config.ParseTTL(pinTTL)
 	if err != nil {
 		return fmt.Errorf("invalid --ttl value: %w", err)
 	}
 
-	// 统一利用 resolveHashes 解析（策略上允许降级调用本地 `nix build` 获取新构建的 hash）
-	inputHashes, err := resolveHashes(ctx, args, true)
+	// Resolve inputs: allow nix build fallback.
+	inputHashes, err := config.ResolveHashes(ctx, args, true)
 	if err != nil {
 		return err
 	}
@@ -52,7 +53,7 @@ func runPin(cmd *cobra.Command, args []string) error {
 	client := oci.NewClient(cfg.Registry, cfg.Repo, cfg.Token)
 	index, err := client.FetchIndex(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to fetch index: %w", err)
+		return fmt.Errorf("fetch index: %w", err)
 	}
 
 	for _, hash := range inputHashes {
@@ -65,7 +66,7 @@ func runPin(cmd *cobra.Command, args []string) error {
 
 	log.Action("Saving updated index back to OCI...")
 	if err := client.PushIndex(ctx, index); err != nil {
-		return fmt.Errorf("failed to push index: %w", err)
+		return fmt.Errorf("push index: %w", err)
 	}
 
 	return nil

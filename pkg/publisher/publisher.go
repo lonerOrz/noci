@@ -28,9 +28,7 @@ type cacheProgress struct {
 	err   error
 }
 
-// ExportCache ensures nix.ExportAndCompress runs at most once per store path
-// across all registries. Concurrent callers for the same path block until the
-// first export completes, then share the result.
+// ExportCache ensures ExportAndCompress runs at most once per store path across registries.
 type ExportCache struct {
 	mu    sync.Mutex
 	paths map[string]*cacheProgress
@@ -88,7 +86,7 @@ func (c *ExportCache) Cleanup() {
 }
 
 type Publisher struct {
-	client       *oci.Client
+	clients      []*oci.Client
 	signer       *nix.Signer
 	skipUpstream bool
 	comp         string
@@ -96,20 +94,36 @@ type Publisher struct {
 	jobs         int
 	Profile      bool
 	cache        *ExportCache
+	runner       nix.Runner
+	logger       log.Logger
 }
 
-func NewPublisher(client *oci.Client, signer *nix.Signer, skipUpstream bool, comp string, compLevel int, jobs int, cache *ExportCache) *Publisher {
-	if client == nil || signer == nil {
-		panic("publisher: client and signer must not be nil")
+// SetLogger replaces the default stderr logger.
+func (p *Publisher) SetLogger(l log.Logger) {
+	if l == nil {
+		p.logger = log.NopLogger{}
+	} else {
+		p.logger = l
+	}
+}
+
+func NewPublisher(clients []*oci.Client, signer *nix.Signer, skipUpstream bool, comp string, compLevel int, jobs int) *Publisher {
+	if len(clients) == 0 {
+		panic("publisher: at least one client required")
+	}
+	if signer == nil {
+		panic("publisher: signer must not be nil")
 	}
 	return &Publisher{
-		client:       client,
+		clients:      clients,
 		signer:       signer,
 		skipUpstream: skipUpstream,
 		comp:         comp,
 		compLevel:    compLevel,
 		jobs:         jobs,
-		cache:        cache,
+		cache:        NewExportCache(),
+		runner:       nix.DefaultRunner,
+		logger:       log.DefaultLogger{},
 	}
 }
 
@@ -122,47 +136,160 @@ type uploadResult struct {
 	refs    []string
 }
 
+// diffResult holds the output of stageDiffIndex, including the fetched index
+// and its manifest digest for optimistic concurrency in stageMergeIndex.
+type diffResult struct {
+	uploadList  []nix.PathInfo
+	index       *oci.CacheIndex
+	indexDigest string
+}
+
+// Publish runs the full publish pipeline across all registries.
 func (p *Publisher) Publish(ctx context.Context, inputPaths []string) error {
+	defer p.cache.Cleanup()
+
+	if len(p.clients) == 1 {
+		return p.publishToRegistry(ctx, p.clients[0], inputPaths)
+	}
+
+	p.logger.Info("Pushing to %d registries...", len(p.clients))
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, len(p.clients))
+
+	for _, client := range p.clients {
+		wg.Add(1)
+		go func(c *oci.Client) {
+			defer wg.Done()
+			if err := p.publishToRegistry(ctx, c, inputPaths); err != nil {
+				p.logger.Warning("Push to registry failed: %v", err)
+				errCh <- err
+			} else {
+				p.logger.Success("Push to registry completed.")
+			}
+		}(client)
+	}
+
+	wg.Wait()
+	close(errCh)
+
+	var errs []error
+	for e := range errCh {
+		errs = append(errs, e)
+	}
+	if len(errs) == len(p.clients) {
+		return fmt.Errorf("all registries failed: %v", errs)
+	}
+	if len(errs) > 0 {
+		p.logger.Warning("%d registries failed, %d succeeded.", len(errs), len(p.clients)-len(errs))
+	}
+	return nil
+}
+
+// publishToRegistry orchestrates the 4-stage publish pipeline for a single registry.
+func (p *Publisher) publishToRegistry(ctx context.Context, store oci.Store, inputPaths []string) error {
 	totalStart := time.Now()
-	var t0, t1, t2, t3, t4, t5, t6 time.Time
+	var t0, t1, t2, t3, t4, t5 time.Time
 
 	t0 = time.Now()
-
-	if p.signer != nil {
-		pubKey := p.signer.PrivateKey.Public().(ed25519.PublicKey)
-		publicKeyStr := fmt.Sprintf("%s:%s",
-			p.signer.KeyName,
-			base64.StdEncoding.EncodeToString(pubKey),
-		)
-		pubManifest := oci.OCIManifest{
-			SchemaVersion: 2,
-			MediaType:     "application/vnd.oci.image.manifest.v1+json",
-			Config: oci.Descriptor{
-				MediaType: "application/vnd.oci.image.config.v1+json",
-				Size:      0,
-				Digest:    "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-			},
-			Annotations: map[string]string{
-				"org.nix.public_key": publicKeyStr,
-			},
-		}
-		_ = p.client.PushManifest(ctx, "public-key", &pubManifest)
+	if err := p.stageEnsurePublicKey(ctx, store); err != nil {
+		p.logger.Warning("Failed to push public key manifest: %v", err)
 	}
-
 	t1 = time.Now()
-	index, err := p.client.FetchIndex(ctx)
+
+	dr, err := p.stageDiffIndex(ctx, store, inputPaths, &t2, &t3)
 	if err != nil {
-		return fmt.Errorf("failed to load index: %w", err)
+		return fmt.Errorf("pipeline stage diff-index failed: %w", err)
 	}
 
-	t2 = time.Now()
-	log.Action("Evaluating closure for %d paths...", len(inputPaths))
-	closure, err := nix.GetClosure(ctx, inputPaths)
-	if err != nil {
-		return fmt.Errorf("failed to get closure: %w", err)
+	if len(dr.uploadList) == 0 {
+		if p.Profile {
+			p.logger.Info("[profile] Publish pipeline:")
+			p.logger.Info("  - Sign/PushManifest: %v", t1.Sub(t0))
+			p.logger.Info("  - FetchIndex:        %v", t2.Sub(t1))
+			p.logger.Info("  - DiffCheck:         %v", t3.Sub(t2))
+			p.logger.Info("  - Total:             %v", time.Since(totalStart))
+		}
+		p.logger.Success("All packages are already cached!")
+		return nil
 	}
 
-	t3 = time.Now()
+	results, err := p.stageUploadConcurrently(ctx, store, dr.uploadList)
+	if err != nil {
+		return fmt.Errorf("pipeline stage upload failed: %w", err)
+	}
+	t4 = time.Now()
+
+	if err := p.stageMergeIndex(ctx, store, dr.index, dr.indexDigest, results); err != nil {
+		return fmt.Errorf("pipeline stage merge-index failed: %w", err)
+	}
+	t5 = time.Now()
+
+	if p.Profile {
+		p.logger.Info("[profile] Publish pipeline:")
+		p.logger.Info("  - Sign/PushManifest: %v", t1.Sub(t0))
+		p.logger.Info("  - FetchIndex:        %v", t2.Sub(t1))
+		p.logger.Info("  - DiffCheck:         %v", t3.Sub(t2))
+		p.logger.Info("  - Upload+PushManifest: %v", t4.Sub(t3))
+		p.logger.Info("  - LateMerge:         %v", t5.Sub(t4))
+		p.logger.Info("  - Total:             %v", time.Since(totalStart))
+	}
+
+	p.logger.Success("Cached %d packages successfully.", len(dr.uploadList))
+	return nil
+}
+
+// stageEnsurePublicKey pushes the signing public key as an OCI manifest.
+// Skips if the manifest already exists in the registry.
+func (p *Publisher) stageEnsurePublicKey(ctx context.Context, store oci.Store) error {
+	if p.signer == nil {
+		return nil
+	}
+
+	if exists, _ := store.ManifestExists(ctx, "public-key"); exists {
+		if p.Profile {
+			p.logger.Info("[profile] Public key manifest already exists, skipping push.")
+		}
+		return nil
+	}
+
+	pubKey := p.signer.PrivateKey.Public().(ed25519.PublicKey)
+	publicKeyStr := fmt.Sprintf("%s:%s",
+		p.signer.KeyName,
+		base64.StdEncoding.EncodeToString(pubKey),
+	)
+	pubManifest := oci.OCIManifest{
+		SchemaVersion: 2,
+		MediaType:     oci.MediaTypeImageManifest,
+		Config:        oci.DefaultEmptyConfigDescriptor(),
+		Annotations: map[string]string{
+			"org.nix.public_key": publicKeyStr,
+		},
+	}
+	return store.PushManifest(ctx, "public-key", &pubManifest)
+}
+
+// stageDiffIndex computes the closure, diffs against the remote index,
+// repairs stale entries, filters upstream-cached paths, and returns the upload list.
+// tFetch and tDiff are optional timing outputs for profiling.
+func (p *Publisher) stageDiffIndex(ctx context.Context, store oci.Store, inputPaths []string, tFetch, tDiff *time.Time) (*diffResult, error) {
+	index, err := store.FetchIndex(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load index: %w", err)
+	}
+	if tFetch != nil {
+		*tFetch = time.Now()
+	}
+
+	// Capture remote index digest for optimistic concurrency in LateMerge
+	_, indexDigest := store.ManifestExists(ctx, "noci-index")
+
+	p.logger.Action("Evaluating closure for %d paths...", len(inputPaths))
+	closure, err := p.runner.GetClosure(ctx, inputPaths)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get closure: %w", err)
+	}
+
 	var missing []struct {
 		path string
 		hash string
@@ -194,7 +321,7 @@ func (p *Publisher) Publish(ctx context.Context, inputPaths []string) error {
 				<-checkSem
 				checkWg.Done()
 			}()
-			exists, _ := p.client.ManifestExists(ctx, hash)
+			exists, _ := store.ManifestExists(ctx, hash)
 			resultChan <- checkResult{hash: hash, path: path, exists: exists}
 		}(m.path, m.hash)
 	}
@@ -205,8 +332,8 @@ func (p *Publisher) Publish(ctx context.Context, inputPaths []string) error {
 	var repairCount int
 	for res := range resultChan {
 		if res.exists {
-			if err := p.client.RepairIndexEntry(ctx, res.hash, index); err != nil {
-				log.Warning("Failed to repair index entry for %s: %v", res.hash, err)
+			if err := store.RepairIndexEntry(ctx, res.hash, index); err != nil {
+				p.logger.Warning("Failed to repair index entry for %s: %v", res.hash, err)
 				uncachedPaths = append(uncachedPaths, res.path)
 			} else {
 				repairCount++
@@ -217,30 +344,22 @@ func (p *Publisher) Publish(ctx context.Context, inputPaths []string) error {
 	}
 
 	if repairCount > 0 {
-		if err := p.client.PushIndex(ctx, index); err != nil {
-			return fmt.Errorf("failed to push repaired index: %w", err)
+		if err := store.PushIndex(ctx, index); err != nil {
+			return nil, fmt.Errorf("failed to push repaired index: %w", err)
 		}
-		log.Success("Repaired %d stale index entries.", repairCount)
+		p.logger.Success("Repaired %d stale index entries.", repairCount)
 	}
 
 	if len(uncachedPaths) == 0 {
-		if p.Profile {
-			t4 = time.Now()
-			log.Info("[profile] Publish pipeline:")
-			log.Info("  - Sign/PushManifest: %v", t1.Sub(t0))
-			log.Info("  - FetchIndex:        %v", t2.Sub(t1))
-			log.Info("  - GetClosure:        %v", t3.Sub(t2))
-			log.Info("  - Check+repair:      %v", t4.Sub(t3))
-			log.Info("  - Total:             %v", time.Since(totalStart))
+		if tDiff != nil {
+			*tDiff = time.Now()
 		}
-		log.Success("All packages are already cached!")
-		return nil
+		return &diffResult{index: index, indexDigest: indexDigest}, nil
 	}
 
-	t4 = time.Now()
-	infos, err := nix.GetPathInfos(ctx, uncachedPaths)
+	infos, err := p.runner.GetPathInfos(ctx, uncachedPaths)
 	if err != nil {
-		return fmt.Errorf("failed to get path infos: %w", err)
+		return nil, fmt.Errorf("failed to get path infos: %w", err)
 	}
 
 	var uploadList []nix.PathInfo
@@ -269,30 +388,28 @@ func (p *Publisher) Publish(ctx context.Context, inputPaths []string) error {
 	}
 
 	if skippedUpstreamCount > 0 {
-		log.Success("Skipped %d upstream-cached paths.", skippedUpstreamCount)
+		p.logger.Success("Skipped %d upstream-cached paths.", skippedUpstreamCount)
 	}
-
-	if len(uploadList) == 0 {
-		if p.Profile {
-			t5 = time.Now()
-			log.Info("[profile] Publish pipeline:")
-			log.Info("  - Sign/PushManifest: %v", t1.Sub(t0))
-			log.Info("  - FetchIndex:        %v", t2.Sub(t1))
-			log.Info("  - GetClosure:        %v", t3.Sub(t2))
-			log.Info("  - Check+repair:      %v", t4.Sub(t3))
-			log.Info("  - GetPathInfos:      %v", t5.Sub(t4))
-			log.Info("  - Total:             %v", time.Since(totalStart))
-		}
-		log.Success("All packages are already cached!")
-		return nil
-	}
-
-	log.Info("Found %d new paths. Uploading concurrently...", len(uploadList))
 
 	// Sort by size descending so large files start first
 	sort.Slice(uploadList, func(i, j int) bool {
 		return uploadList[i].NarSize > uploadList[j].NarSize
 	})
+
+	if tDiff != nil {
+		*tDiff = time.Now()
+	}
+
+	return &diffResult{
+		uploadList:  uploadList,
+		index:       index,
+		indexDigest: indexDigest,
+	}, nil
+}
+
+// stageUploadConcurrently exports NARs, uploads blobs, and pushes manifests in parallel.
+func (p *Publisher) stageUploadConcurrently(ctx context.Context, store oci.Store, uploadList []nix.PathInfo) ([]uploadResult, error) {
+	p.logger.Info("Found %d new paths. Uploading concurrently...", len(uploadList))
 
 	outcomeChan := make(chan uploadResult, len(uploadList))
 	concurrency := p.jobs
@@ -325,7 +442,7 @@ func (p *Publisher) Publish(ctx context.Context, inputPaths []string) error {
 				wg.Done()
 			}()
 
-			res, err := p.publishSingle(pipelineCtx, pathInfo)
+			res, err := p.publishSingle(pipelineCtx, store, pathInfo)
 			if err != nil {
 				errMu.Lock()
 				if firstErr == nil {
@@ -336,18 +453,14 @@ func (p *Publisher) Publish(ctx context.Context, inputPaths []string) error {
 				return
 			}
 
-			layerMediaType := "application/vnd.nix.cache.layer.v1+tar+gzip"
-			if p.comp == "zstd" {
-				layerMediaType = "application/vnd.nix.cache.layer.v1+tar+zstd"
+			layerMediaType := oci.MediaTypeNixLayerGzip
+			if c, err := nix.GetCompressor(p.comp); err == nil {
+				layerMediaType = c.MediaType()
 			}
 			manifest := oci.OCIManifest{
 				SchemaVersion: 2,
-				MediaType:     "application/vnd.oci.image.manifest.v1+json",
-				Config: oci.Descriptor{
-					MediaType: "application/vnd.oci.image.config.v1+json",
-					Size:      0,
-					Digest:    "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-				},
+				MediaType:     oci.MediaTypeImageManifest,
+				Config:        oci.DefaultEmptyConfigDescriptor(),
 				Layers: []oci.Descriptor{
 					{
 						MediaType: layerMediaType,
@@ -361,7 +474,7 @@ func (p *Publisher) Publish(ctx context.Context, inputPaths []string) error {
 					"org.nix.references": strings.Join(res.refs, ","),
 				},
 			}
-			if err := p.client.PushManifest(pipelineCtx, res.hash, &manifest); err != nil {
+			if err := store.PushManifest(pipelineCtx, res.hash, &manifest); err != nil {
 				errMu.Lock()
 				if firstErr == nil {
 					firstErr = fmt.Errorf("push manifest %s failed: %w", res.hash, err)
@@ -375,90 +488,85 @@ func (p *Publisher) Publish(ctx context.Context, inputPaths []string) error {
 		}(info)
 	}
 
-	t5 = time.Now()
 	wg.Wait()
 	close(outcomeChan)
 
 	if firstErr != nil {
-		return firstErr
+		return nil, firstErr
 	}
 
-	t6 = time.Now()
-	freshIndex, err := p.client.FetchIndex(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to re-fetch index for late merge: %w", err)
-	}
-
+	var results []uploadResult
 	for res := range outcomeChan {
-		freshIndex.AddEntry(res.hash, res.name, res.narinfo, res.digest, res.size, res.refs)
+		results = append(results, res)
 	}
-
-	if err := p.client.PushIndex(ctx, freshIndex); err != nil {
-		return fmt.Errorf("failed to push updated index: %w", err)
-	}
-
-	if p.Profile {
-		log.Info("[profile] Publish pipeline:")
-		log.Info("  - Sign/PushManifest: %v", t1.Sub(t0))
-		log.Info("  - FetchIndex:        %v", t2.Sub(t1))
-		log.Info("  - GetClosure:        %v", t3.Sub(t2))
-		log.Info("  - Check+repair:      %v", t4.Sub(t3))
-		log.Info("  - GetPathInfos:      %v", t5.Sub(t4))
-		log.Info("  - Upload+PushManifest: %v", t6.Sub(t5))
-		log.Info("  - LateMerge:         %v", time.Since(t6))
-		log.Info("  - Total:             %v", time.Since(totalStart))
-	}
-
-	log.Success("Cached %d packages successfully.", len(uploadList))
-	return nil
+	return results, nil
 }
 
-func (p *Publisher) publishSingle(ctx context.Context, info nix.PathInfo) (uploadResult, error) {
-	log.Action("Processing: %s", info.Path)
+// stageMergeIndex adds new entries to the index and pushes.
+// Uses optimistic concurrency: if the remote index digest hasn't changed,
+// reuses the local index instead of re-fetching.
+func (p *Publisher) stageMergeIndex(ctx context.Context, store oci.Store, initialIndex *oci.CacheIndex, initialDigest string, results []uploadResult) error {
+	if len(results) == 0 {
+		return nil
+	}
+
+	var targetIndex *oci.CacheIndex
+
+	// Fast-Path: HEAD check if remote index is unchanged
+	_, currentDigest := store.ManifestExists(ctx, "noci-index")
+	if currentDigest != "" && currentDigest == initialDigest && initialIndex != nil {
+		if p.Profile {
+			p.logger.Info("[profile] LateMerge: digest match, reusing local index (Fast-Path)")
+		}
+		targetIndex = initialIndex
+	} else {
+		// Slow-Path: remote index was modified concurrently, re-fetch
+		freshIndex, err := store.FetchIndex(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to re-fetch index for late merge: %w", err)
+		}
+		targetIndex = freshIndex
+	}
+
+	for _, res := range results {
+		targetIndex.AddEntry(res.hash, res.name, res.narinfo, res.digest, res.size, res.refs)
+	}
+
+	return store.PushIndex(ctx, targetIndex)
+}
+
+// publishSingle handles export, upload, signing, and narinfo generation for one store path.
+func (p *Publisher) publishSingle(ctx context.Context, store oci.Store, info nix.PathInfo) (uploadResult, error) {
+	p.logger.Action("Processing: %s", info.Path)
 
 	exportStart := time.Now()
 
-	var tempFile, fileHash string
-	var fileSize int64
-	var err error
-
-	if p.cache != nil {
-		entry, cacheErr := p.cache.GetOrCreate(ctx, info.Path, func() (*ExportCacheEntry, error) {
-			tFile, hash, size, e := nix.ExportAndCompress(ctx, info.Path, p.comp, p.jobs, p.compLevel)
-			if e != nil {
-				return nil, e
-			}
-			return &ExportCacheEntry{TempFile: tFile, FileHash: hash, FileSize: size}, nil
-		})
-		if cacheErr != nil {
-			return uploadResult{}, fmt.Errorf("export failed: %w", cacheErr)
+	entry, cacheErr := p.cache.GetOrCreate(ctx, info.Path, func() (*ExportCacheEntry, error) {
+		tFile, hash, size, e := p.runner.ExportAndCompress(ctx, info.Path, p.comp, p.jobs, p.compLevel)
+		if e != nil {
+			return nil, e
 		}
-		tempFile, fileHash, fileSize = entry.TempFile, entry.FileHash, entry.FileSize
-	} else {
-		tempFile, fileHash, fileSize, err = nix.ExportAndCompress(ctx, info.Path, p.comp, p.jobs, p.compLevel)
-		if err != nil {
-			return uploadResult{}, fmt.Errorf("export failed: %w", err)
-		}
-		defer os.Remove(tempFile)
+		return &ExportCacheEntry{TempFile: tFile, FileHash: hash, FileSize: size}, nil
+	})
+	if cacheErr != nil {
+		return uploadResult{}, fmt.Errorf("export failed: %w", cacheErr)
 	}
 
 	exportDuration := time.Since(exportStart)
 
-	digest, uploadSize, err := p.client.UploadBlobMonolithic(ctx, tempFile, fileHash, "NAR")
-	fileSize = uploadSize
-	uploadDuration := time.Since(exportStart)
-
+	digest, uploadSize, err := store.UploadBlob(ctx, entry.TempFile, entry.FileHash, "NAR", &oci.NoopProgressNotifier{})
 	if err != nil {
 		return uploadResult{}, fmt.Errorf("upload blob failed: %w", err)
 	}
+	uploadDuration := time.Since(exportStart)
 
 	if p.Profile {
-		log.Info("[profile] Path: %s (%s)", nix.GetPathName(info.Path), oci.FormatSize(fileSize))
-		log.Info("  - Export+compress: %v", exportDuration)
-		log.Info("  - Total (incl upload): %v", uploadDuration)
+		p.logger.Info("[profile] Path: %s (%s)", nix.GetPathName(info.Path), oci.FormatSize(uploadSize))
+		p.logger.Info("  - Export+compress: %v", exportDuration)
+		p.logger.Info("  - Total (incl upload): %v", uploadDuration)
 	}
 
-	fileHash = strings.TrimPrefix(digest, "sha256:")
+	fileHash := strings.TrimPrefix(digest, "sha256:")
 	if b32, err := nix.HexToNixBase32(fileHash); err == nil {
 		fileHash = b32
 	}
@@ -477,7 +585,7 @@ func (p *Publisher) publishSingle(ctx context.Context, info nix.PathInfo) (uploa
 		sigs = append(sigs, sig)
 	}
 
-	narinfoContent := nix.GenerateNarInfo(info.Path, normalizedNarHash, info.NarSize, fileHash, fileSize, info.References, sigs, p.comp)
+	narinfoContent := nix.GenerateNarInfo(info.Path, normalizedNarHash, info.NarSize, fileHash, uploadSize, info.References, sigs, p.comp)
 	hash := nix.GetPathHash(info.Path)
 
 	return uploadResult{
@@ -485,7 +593,7 @@ func (p *Publisher) publishSingle(ctx context.Context, info nix.PathInfo) (uploa
 		name:    nix.GetPathName(info.Path),
 		narinfo: narinfoContent,
 		digest:  digest,
-		size:    fileSize,
+		size:    uploadSize,
 		refs:    info.References,
 	}, nil
 }

@@ -22,7 +22,14 @@ var (
 var proxyCmd = &cobra.Command{
 	Use:   "proxy",
 	Short: "Start client-side local cache proxy server",
-	RunE:  runProxy,
+	Long: `Start a local HTTP proxy that caches Nix binary artifacts from an OCI
+registry. The proxy intercepts nix-store HTTP requests and serves them from
+the OCI cache, falling back to upstream caches on miss.
+
+The proxy runs as a background daemon. Use --port and --listen to configure
+the bind address. Authentication and rate limiting are optional.`,
+	Args: cobra.NoArgs,
+	RunE: runProxy,
 }
 
 func init() {

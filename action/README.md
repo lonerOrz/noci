@@ -1,45 +1,59 @@
 # noci-action
 
-A zero-config, high-performance GitHub Action to use **noci** as a Nix binary cache over OCI registries.
+Zero-config Nix binary cache over OCI for GitHub Actions.
 
-## Usage
+**Fetch-only** (default): proxy serves cached paths. No signing key needed.
+**Push mode**: add signing key → built paths auto-push after job. Cache errors never break CI.
 
-Add this step to your GitHub workflow to enable automated caching:
+## Quick Start
 
 ```yaml
-- name: Setup noci binary cache
-  uses: lonerOrz/noci-action@v1
+# Fetch-only — just add this line
+- uses: lonerOrz/noci@v1/action
+
+# Push + fetch — add one input
+- uses: lonerOrz/noci@v1/action
   with:
-    repo: ${{ secrets.NOCI_REPO }} # OCI repository (e.g., owner/repo)
-    signing-key: ${{ secrets.NOCI_SIGNING_KEY }} # Required for pushing
-    token: ${{ secrets.GH_TOKEN }} # Required for authentication
+    signing-key: ${{ secrets.NOCI_SIGNING_KEY }}
 ```
 
-### Inputs
+## Inputs
 
-| Input           | Description                                    | Default                           |
-| :-------------- | :--------------------------------------------- | :-------------------------------- |
-| `repo`          | OCI repository (e.g., `owner/repo`)            | Inferred from `GITHUB_REPOSITORY` |
-| `signing-key`   | Raw Nix signing key (`key_name:base64`)        | None (Fetch-only mode)            |
-| `token`         | OCI registry token                             | `GITHUB_TOKEN`                    |
-| `registry`      | OCI registry endpoint                          | `ghcr.io`                         |
-| `skip-upstream` | Skip pushing packages with upstream signatures | `true`                            |
-| `proxy-port`    | Port for the local proxy (`0` for random)      | `0`                               |
-| `version`       | Version of noci to download                    | `v1.0.0`                          |
+| Input               | Description                                            | Default             |
+| :------------------ | :----------------------------------------------------- | :------------------ |
+| `signing-key`       | Nix signing key (`key_name:base64`). Omit = fetch-only | _(none)_            |
+| `registry`          | OCI registry endpoint                                  | `ghcr.io`           |
+| `repo`              | OCI repository (`owner/repo`)                          | `GITHUB_REPOSITORY` |
+| `token`             | Registry auth token                                    | `GITHUB_TOKEN`      |
+| `compression`       | `zstd` or `gzip`                                       | `zstd`              |
+| `compression-level` | 1-19 for zstd                                          | `3`                 |
+| `jobs`              | Compression threads (`0` = auto)                       | `0`                 |
+| `skip-upstream`     | Skip paths with upstream signatures                    | `true`              |
+| `fail-on-error`     | Push failures = warning, not CI failure                | `false`             |
+| `proxy-port`        | Local proxy port (`0` = random)                        | `0`                 |
 
 ## Outputs
 
-- `proxy-url`: The HTTP address of the local noci proxy.
-- `pushed-count`: Number of store paths successfully pushed to the OCI registry.
+- **`proxy-url`** — HTTP address of the local proxy
+- **`pushed-count`** — Number of paths pushed to registry
 
-## How it works
+## Permissions
 
-1. **Bootstrap**: Downloads or builds the `noci` binary.
-2. **Proxy**: Starts a local proxy server and configures Nix to use it as a substituter via `NIX_CONFIG`.
-3. **Build**: Your subsequent `nix build` or `nix develop` steps pull dependencies from the OCI cache.
-4. **Push**: After the job completes, the action scans newly built paths and pushes them to your OCI registry (if a `signing-key` is provided).
+```yaml
+permissions:
+  contents: read
+  packages: write
+```
 
-## Notes for Self-hosted Runners
+## How It Works
 
-- **Port Management**: It is recommended to keep `proxy-port: 0` (default) to allow the action to automatically negotiate an ephemeral port, preventing collisions on shared host environments.
-- **Permissions**: Ensure your job has `packages: write` permission to allow pushing artifacts to the OCI registry.
+1. **Proxy** starts, configures Nix substituter via `NIX_CONFIG`
+2. **Build** steps pull dependencies through proxy (hit) or upstream (miss)
+3. **Hook** collects all built output paths to an isolated log file
+4. **Push** uploads new paths to OCI registry after the job (if signing key provided)
+
+## Self-hosted Runners
+
+- Keep `proxy-port: 0` (default) for automatic ephemeral port allocation
+- Each run gets isolated hook/log paths via `GITHUB_RUN_ID` + `GITHUB_RUN_ATTEMPT`
+- Proxy process is automatically killed in the post step

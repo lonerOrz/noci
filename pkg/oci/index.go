@@ -2,6 +2,7 @@ package oci
 
 import (
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -12,15 +13,16 @@ type CacheIndex struct {
 	Image     string               `json:"image"`
 	Generated time.Time            `json:"generated"`
 	PublicKey string               `json:"public_key"`
-	GCRootsV1 []string             `json:"gc_roots,omitempty"` // 向前兼容 v1 废弃字段
-	Roots     map[string]GCRoot    `json:"roots,omitempty"`    // v2 弹性的根结构
+	GCRootsV1 []string             `json:"gc_roots,omitempty"` // deprecated v1 field
+	Roots     map[string]GCRoot    `json:"roots,omitempty"`
 	Entries   map[string]IndexItem `json:"entries"`
-	Source    string               `json:"source,omitempty"` // 该 index 所属 registry
+	Source    string               `json:"source,omitempty"`
+	mu        sync.Mutex           `json:"-"`
 }
 
 type GCRoot struct {
 	PinnedAt time.Time `json:"pinned_at"`
-	TTL      int64     `json:"ttl"` // TTL 周期，0 表示永久固定
+	TTL      int64     `json:"ttl"` // 0 = permanent
 }
 
 type IndexItem struct {
@@ -29,10 +31,10 @@ type IndexItem struct {
 	NarDigest  string    `json:"nar_digest"`
 	NarSize    int64     `json:"nar_size"`
 	Added      time.Time `json:"added"`
-	LastUsed   time.Time `json:"last_used"`   // 活跃时间戳（LRU 支撑）
-	UploadedAt time.Time `json:"uploaded_at"` // 物理上传时间（安全宽限期支撑）
-	References []string  `json:"references"`  // 预析出的哈希依赖图，实现零网络开销图搜索
-	Source     string    `json:"source,omitempty"` // 条目来源 registry
+	LastUsed   time.Time `json:"last_used"`
+	UploadedAt time.Time `json:"uploaded_at"`
+	References []string  `json:"references"`
+	Source     string    `json:"source,omitempty"`
 }
 
 func NewIndex(registry, repo string) *CacheIndex {
@@ -47,7 +49,7 @@ func NewIndex(registry, repo string) *CacheIndex {
 	}
 }
 
-// Upgrade 将从 OCI 中拉取到的原有结构安全平滑地迁移至 V2 规范，避免历史污染
+// Upgrade migrates a V1 index to V2 format in-place.
 func (idx *CacheIndex) Upgrade() {
 	if idx.Version < 2 {
 		idx.Version = 2
@@ -56,7 +58,7 @@ func (idx *CacheIndex) Upgrade() {
 		idx.Roots = make(map[string]GCRoot)
 	}
 
-	// 转换 V1 历史 GC roots 为 V2 Roots Map
+	// Migrate v1 root list to v2 map.
 	if len(idx.GCRootsV1) > 0 {
 		for _, r := range idx.GCRootsV1 {
 			if _, exists := idx.Roots[r]; !exists {
@@ -66,10 +68,10 @@ func (idx *CacheIndex) Upgrade() {
 				}
 			}
 		}
-		idx.GCRootsV1 = nil // 彻底抹除旧属性
+		idx.GCRootsV1 = nil
 	}
 
-	// 补全由于 V1 没有写入的时间和依赖字段
+	// Backfill fields missing from v1 entries.
 	for k, entry := range idx.Entries {
 		modified := false
 		if entry.LastUsed.IsZero() {
@@ -91,8 +93,10 @@ func (idx *CacheIndex) Upgrade() {
 }
 
 func (idx *CacheIndex) AddEntry(hash, name, narinfo, digest string, size int64, refs []string) {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
 	now := time.Now()
-	// Normalize: strip "sha256:" prefix from digest so NarDigest always stores bare hex.
+	// Strip "sha256:" prefix so NarDigest stores bare hex.
 	hex := strings.TrimPrefix(digest, "sha256:")
 	idx.Entries[hash] = IndexItem{
 		Name:       name,
@@ -108,6 +112,8 @@ func (idx *CacheIndex) AddEntry(hash, name, narinfo, digest string, size int64, 
 }
 
 func (idx *CacheIndex) PinRoot(hash string, ttlSeconds int64) {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
 	if idx.Roots == nil {
 		idx.Roots = make(map[string]GCRoot)
 	}

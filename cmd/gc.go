@@ -2,10 +2,10 @@ package cmd
 
 import (
 	"fmt"
+	"noci/pkg/config"
 	"noci/pkg/gc"
 	"noci/pkg/log"
 	"noci/pkg/oci"
-	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -23,7 +23,15 @@ var (
 var gcCmd = &cobra.Command{
 	Use:   "gc [paths, targets, or 32-char hashes...]",
 	Short: "Garbage collect orphaned, quota-exceeded, or targeted packages",
-	RunE:  runGC,
+	Long: `Remove cached packages from the OCI registry. Without arguments, performs
+quota-based eviction using --max-size and --grace-period. With arguments,
+explicitly targets specific hashes for removal.
+
+Use --physical-sweep to physically delete evicted manifest tags from the
+registry (required on GHCR which uses tag-overwriting). --keep-versions
+retains N recent versions per package name.`,
+	Args: cobra.ArbitraryArgs,
+	RunE: runGC,
 }
 
 func init() {
@@ -33,8 +41,6 @@ func init() {
 	gcCmd.Flags().StringVar(&gcGracePeriod, "grace-period", "6h", "Safety grace period for newly uploaded files")
 	gcCmd.Flags().BoolVar(&gcPhysicalSweep, "physical-sweep", false, "Physically prune evicted OCI manifests (supports tag-overwriting on GHCR)")
 	gcCmd.Flags().IntVar(&gcKeepVersions, "keep-versions", 3, "Keep at most N recent versions per package name (0 = disabled)")
-
-	RootCmd.AddCommand(gcCmd)
 }
 
 func runGC(cmd *cobra.Command, args []string) error {
@@ -45,41 +51,33 @@ func runGC(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	maxBytes, err := parseSizeString(gcMaxSize)
+	maxBytes, err := config.ParseSize(gcMaxSize)
 	if err != nil {
-		return fmt.Errorf("failed to parse max-size: %w", err)
+		return fmt.Errorf("parse max-size: %w", err)
 	}
 
 	dur, err := time.ParseDuration(gcGracePeriod)
 	if err != nil {
-		return fmt.Errorf("failed to parse grace-period: %w", err)
+		return fmt.Errorf("parse grace-period: %w", err)
+	}
+
+	inputHashes, err := config.ResolveHashes(ctx, args, false)
+	if err != nil {
+		return err
 	}
 
 	client := oci.NewClient(cfg.Registry, cfg.Repo, cfg.Token)
-	index, err := client.FetchIndex(ctx)
+	runner := gc.NewRunner(client, dur, gcKeepVersions, gcPhysicalSweep, gcDryRun)
+
+	result, err := runner.Run(ctx, maxBytes, inputHashes)
 	if err != nil {
-		return fmt.Errorf("failed to fetch index: %w", err)
-	}
-
-	engine := gc.NewEngine(index, dur)
-	engine.SetKeepVersions(gcKeepVersions)
-	var result *gc.Result
-
-	if len(args) > 0 {
-		inputHashes, err := resolveHashes(ctx, args, false)
-		if err != nil {
-			return err
-		}
-		log.Action("Targeted eviction resolved to %d input hashes.", len(inputHashes))
-		result = engine.CascadeEvict(inputHashes)
-	} else {
-		result = engine.Sweep(time.Now(), maxBytes)
+		return err
 	}
 
 	log.Info("GC Summary:")
-	fmt.Printf("  Live:    %d (%d B)\n", result.OriginalCount, result.OriginalSize)
-	fmt.Printf("  Keep:    %d (%d B)\n", result.RetainedCount, result.RetainedSize)
-	fmt.Printf("  Evict:   %d (%d B)\n", result.EvictedCount, result.EvictedSize)
+	log.Info("  Live:    %d (%s)", result.OriginalCount, oci.FormatSize(result.OriginalSize))
+	log.Info("  Keep:    %d (%s)", result.RetainedCount, oci.FormatSize(result.RetainedSize))
+	log.Info("  Evict:   %d (%s)", result.EvictedCount, oci.FormatSize(result.EvictedSize))
 
 	if result.EvictedCount == 0 {
 		log.Success("No packages to clean.")
@@ -89,55 +87,9 @@ func runGC(cmd *cobra.Command, args []string) error {
 	if gcDryRun {
 		log.Warning("DRY RUN: Evicting hashes:")
 		for _, key := range result.EvictedKeys {
-			fmt.Printf("  - %s\n", key)
+			log.Info("  - %s", key)
 		}
 		return nil
-	}
-
-	type blobSweepInfo struct {
-		key    string
-		digest string
-	}
-	var sweepList []blobSweepInfo
-	for _, key := range result.EvictedKeys {
-		if entry, exists := index.Entries[key]; exists {
-			sweepList = append(sweepList, blobSweepInfo{
-				key:    key,
-				digest: entry.NarDigest,
-			})
-		}
-	}
-
-	engine.Apply(result)
-
-	log.Action("Updating OCI state...")
-	if err := client.PushIndex(ctx, index); err != nil {
-		return fmt.Errorf("failed to push updated index: %w", err)
-	}
-
-	if gcPhysicalSweep && len(sweepList) > 0 {
-		log.Action("Physically pruning evicted manifests concurrently (8 workers)...")
-		sem := make(chan struct{}, 8)
-		var wg sync.WaitGroup
-
-		for _, sweep := range sweepList {
-			sem <- struct{}{}
-			wg.Add(1)
-
-			go func(key string) {
-				defer func() {
-					<-sem
-					wg.Done()
-				}()
-				log.Action("Pruning physical manifest tag: %s", key)
-				if err := client.DeleteManifest(ctx, key); err != nil {
-					log.Warning("Failed to prune physical manifest tag %s: %v", key, err)
-				} else {
-					log.Success("Successfully pruned physical manifest tag: %s", key)
-				}
-			}(sweep.key)
-		}
-		wg.Wait()
 	}
 
 	log.Success("GC completed.")

@@ -1,278 +1,104 @@
 package oci
 
 import (
-	"bytes"
-	"compress/gzip"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
-	"noci/pkg/log"
 	"os"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
 
-	"github.com/klauspost/compress/zstd"
 	"golang.org/x/term"
 )
 
-type OCIManifest struct {
-	SchemaVersion int               `json:"schemaVersion"`
-	MediaType     string            `json:"mediaType"`
-	Config        Descriptor        `json:"config"`
-	Layers        []Descriptor      `json:"layers"`
-	Annotations   map[string]string `json:"annotations,omitempty"`
-}
-
-type Descriptor struct {
-	MediaType string `json:"mediaType"`
-	Digest    string `json:"digest"`
-	Size      int64  `json:"size"`
-}
-
+// Client is the composition root for OCI registry operations.
+// It delegates to Transport (auth/retry), blobService (upload/download/delete),
+// and manifestService (CRUD/index/tags) internally.
 type Client struct {
-	registry      string
-	repo          string
-	token         string
-	tokenMu       sync.Mutex
-	ociTokenPull  string
-	pullFetchTime time.Time
-	ociTokenPush  string
-	pushFetchTime time.Time
-	client        *http.Client
-	Profile       bool
+	transport *Transport
+	blobs     *blobService
+	manifests *manifestService
+
+	Profile bool
 }
 
 func NewClient(registry, repo, token string) *Client {
 	if registry == "" || repo == "" {
 		panic("oci: registry and repo must not be empty")
 	}
-	transport := &http.Transport{
-		MaxIdleConns:        100,
-		MaxIdleConnsPerHost: 100,
-		IdleConnTimeout:     90 * time.Second,
-		TLSHandshakeTimeout: 10 * time.Second,
+	t := NewTransport(registry, repo, token)
+	c := &Client{
+		transport: t,
 	}
-	return &Client{
-		registry: strings.ToLower(registry),
-		repo:     strings.ToLower(repo),
-		token:    token,
-		client: &http.Client{
-			Transport: transport,
-		},
-	}
+	c.blobs = newBlobService(t, &c.Profile)
+	c.manifests = newManifestService(t, c.blobs, &c.Profile)
+	return c
 }
 
 func (c *Client) SetHTTPClient(hc *http.Client) {
-	c.client = hc
+	c.transport.SetHTTPClient(hc)
 }
 
-func (c *Client) getOciToken(ctx context.Context, actions string) (string, error) {
-	c.tokenMu.Lock()
-	defer c.tokenMu.Unlock()
+// --- Store interface delegation ---
 
-	// GHCR tokens expire in ~5 min; cache for 4 min to ensure fresh token on retry
-	const tokenCacheTTL = 4 * time.Minute
-	if actions == "pull" {
-		if c.ociTokenPull != "" && time.Since(c.pullFetchTime) < tokenCacheTTL {
-			return c.ociTokenPull, nil
-		}
-	} else {
-		if c.ociTokenPush != "" && time.Since(c.pushFetchTime) < tokenCacheTTL {
-			return c.ociTokenPush, nil
-		}
-	}
-
-	scope := fmt.Sprintf("repository:%s/nix-cache:%s", c.repo, actions)
-	url := fmt.Sprintf("https://%s/token?scope=%s&service=%s", c.registry, scope, c.registry)
-
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return "", err
-	}
-
-	if c.token != "" {
-		req.SetBasicAuth("token", c.token)
-	}
-
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		bodyBytes, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("fetch token for %s failed: HTTP %d, %s", actions, resp.StatusCode, string(bodyBytes))
-	}
-
-	var res struct {
-		Token string `json:"token"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
-		return "", err
-	}
-
-	if actions == "pull" {
-		c.ociTokenPull = res.Token
-		c.pullFetchTime = time.Now()
-	} else {
-		c.ociTokenPush = res.Token
-		c.pushFetchTime = time.Now()
-	}
-	return res.Token, nil
+func (c *Client) FetchIndex(ctx context.Context) (*CacheIndex, error) {
+	return c.manifests.FetchIndex(ctx)
 }
 
-func (c *Client) Request(ctx context.Context, method, path string, body io.Reader, contentType string) (*http.Response, error) {
-	return c.doRequest(ctx, method, path, body, contentType, true)
-}
-
-func (c *Client) RawRequest(ctx context.Context, method, path string, body io.Reader, contentType string) (*http.Response, error) {
-	return c.doRequest(ctx, method, path, body, contentType, false)
-}
-
-func (c *Client) doRequest(ctx context.Context, method, path string, body io.Reader, contentType string, followRedirects bool) (*http.Response, error) {
-	actions := "pull"
-	if method != "GET" && method != "HEAD" {
-		actions = "pull,push"
-	}
-	token, err := c.getOciToken(ctx, actions)
-	if err != nil {
-		return nil, err
-	}
-
-	url := fmt.Sprintf("https://%s/v2/%s/nix-cache%s", c.registry, c.repo, path)
-
-	doer := c.client.Do
-	if !followRedirects {
-		doer = c.getTransport().RoundTrip
-	}
-	return c.doWithRetry(ctx, method, url, token, contentType, body, doer)
-}
-
-func (c *Client) getTransport() http.RoundTripper {
-	if c.client.Transport != nil {
-		return c.client.Transport
-	}
-	return http.DefaultTransport
-}
-
-func (c *Client) doWithRetry(ctx context.Context, method, url, token, contentType string, body io.Reader, doer func(*http.Request) (*http.Response, error)) (*http.Response, error) {
-	const maxRetries = 3
-	var resp *http.Response
-	var err error
-	backoff := time.Second
-
-	for attempt := 0; attempt <= maxRetries; attempt++ {
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		default:
-		}
-
-		var req *http.Request
-		req, err = http.NewRequestWithContext(ctx, method, url, body)
-		if err != nil {
-			return nil, err
-		}
-
-		req.Header.Set("Authorization", "Bearer "+token)
-		if contentType != "" {
-			req.Header.Set("Content-Type", contentType)
-			req.Header.Set("Accept", contentType)
-		}
-
-		resp, err = doer(req)
-		if err == nil {
-			if resp.StatusCode < 500 {
-				return resp, nil
-			}
-			resp.Body.Close()
-		}
-
-		if attempt < maxRetries {
-			time.Sleep(backoff)
-			backoff *= 2
-		}
-	}
-	return resp, err
+func (c *Client) PushIndex(ctx context.Context, idx *CacheIndex) error {
+	return c.manifests.PushIndex(ctx, idx)
 }
 
 func (c *Client) FetchManifest(ctx context.Context, tag string) (*OCIManifest, error) {
-	resp, err := c.Request(ctx, "GET", "/manifests/"+tag, nil, "application/vnd.oci.image.manifest.v1+json")
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("manifest %s not found: HTTP %d", tag, resp.StatusCode)
-	}
-
-	var manifest OCIManifest
-	if err := json.NewDecoder(resp.Body).Decode(&manifest); err != nil {
-		return nil, err
-	}
-	return &manifest, nil
-}
-
-func (c *Client) RepairIndexEntry(ctx context.Context, hash string, index *CacheIndex) error {
-	manifest, err := c.FetchManifest(ctx, hash)
-	if err != nil {
-		return fmt.Errorf("fetch manifest %s: %w", hash, err)
-	}
-
-	if manifest.Annotations == nil {
-		return fmt.Errorf("manifest %s has no annotations", hash)
-	}
-
-	name := manifest.Annotations["org.nix.name"]
-	narinfo := manifest.Annotations["org.nix.narinfo"]
-	refsStr := manifest.Annotations["org.nix.references"]
-
-	var refs []string
-	if refsStr != "" {
-		refs = strings.Split(refsStr, ",")
-	}
-
-	if len(manifest.Layers) == 0 {
-		return fmt.Errorf("manifest %s has no layers", hash)
-	}
-
-	digest := manifest.Layers[0].Digest
-	size := manifest.Layers[0].Size
-
-	index.AddEntry(hash, name, narinfo, digest, size, refs)
-	return nil
+	return c.manifests.FetchManifest(ctx, tag)
 }
 
 func (c *Client) PushManifest(ctx context.Context, tag string, manifest *OCIManifest) error {
-	data, err := json.Marshal(manifest)
-	if err != nil {
-		return err
-	}
-
-	resp, err := c.Request(ctx, "PUT", "/manifests/"+tag, bytes.NewReader(data), "application/vnd.oci.image.manifest.v1+json")
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		bodyBytes, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("failed to upload manifest: HTTP %d, %s", resp.StatusCode, string(bodyBytes))
-	}
-	return nil
+	return c.manifests.PushManifest(ctx, tag, manifest)
 }
 
+func (c *Client) ManifestExists(ctx context.Context, tag string) (bool, string) {
+	return c.manifests.ManifestExists(ctx, tag)
+}
+
+func (c *Client) UploadBlob(ctx context.Context, filePath, sha256Hex, description string, notifier ProgressNotifier) (digest string, size int64, err error) {
+	return c.blobs.UploadBlob(ctx, filePath, sha256Hex, description, notifier)
+}
+
+func (c *Client) DeleteManifest(ctx context.Context, tag string) error {
+	return c.manifests.DeleteManifest(ctx, tag)
+}
+
+func (c *Client) RepairIndexEntry(ctx context.Context, hash string, index *CacheIndex) error {
+	return c.manifests.RepairIndexEntry(ctx, hash, index)
+}
+
+func (c *Client) DeleteBlob(ctx context.Context, digest string) error {
+	return c.blobs.DeleteBlob(ctx, digest)
+}
+
+func (c *Client) ListTags(ctx context.Context) ([]string, error) {
+	return c.manifests.ListTags(ctx)
+}
+
+func (c *Client) GetBlobRedirectURL(ctx context.Context, digest string) (string, error) {
+	return c.manifests.GetBlobRedirectURL(ctx, digest)
+}
+
+// --- Backward-compat pass-throughs used by server/handler.go ---
+
+func (c *Client) Request(ctx context.Context, method, path string, body io.Reader, contentType string) (*http.Response, error) {
+	return c.transport.request(ctx, method, path, body, contentType)
+}
+
+func (c *Client) RawRequest(ctx context.Context, method, path string, body io.Reader, contentType string) (*http.Response, error) {
+	return c.transport.rawRequest(ctx, method, path, body, contentType)
+}
+
+// CheckCacheStatus checks if a manifest exists and whether it's evicted.
 func (c *Client) CheckCacheStatus(ctx context.Context, tag string) (exists bool, isEvicted bool) {
-	resp, err := c.Request(ctx, "HEAD", "/manifests/"+tag, nil, "application/vnd.oci.image.manifest.v1+json")
+	resp, err := c.Request(ctx, "HEAD", "/manifests/"+tag, nil, MediaTypeImageManifest)
 	if err != nil || resp.StatusCode != http.StatusOK {
 		if resp != nil {
 			resp.Body.Close()
@@ -291,803 +117,73 @@ func (c *Client) CheckCacheStatus(ctx context.Context, tag string) (exists bool,
 	return true, false
 }
 
-func (c *Client) ManifestExists(ctx context.Context, tag string) (bool, string) {
-	resp, err := c.Request(ctx, "HEAD", "/manifests/"+tag, nil, "application/vnd.oci.image.manifest.v1+json")
-	if err != nil {
-		return false, ""
-	}
-	defer resp.Body.Close()
+// --- Progress reporting ---
 
-	if resp.StatusCode == http.StatusOK {
-		return true, resp.Header.Get("Docker-Content-Digest")
-	}
-	return false, ""
+// ProgressNotifier reports upload progress.
+type ProgressNotifier interface {
+	Update(description string, offset, total int64)
+	Finish()
 }
 
-func (c *Client) GetBlobRedirectURL(ctx context.Context, digest string) (string, error) {
-	resp, err := c.Request(ctx, "GET", "/blobs/"+digest, nil, "")
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusTemporaryRedirect || resp.StatusCode == http.StatusFound {
-		return resp.Header.Get("Location"), nil
-	}
-	return "", fmt.Errorf("redirect failed: HTTP %d", resp.StatusCode)
+// StderrProgressNotifier writes progress to stderr with TTY-aware formatting.
+type StderrProgressNotifier struct {
+	isTTY      bool
+	lastPrint  time.Time
+	lastBucket int
+	finished   bool
+	mu         sync.Mutex
 }
 
-func (c *Client) ListTags(ctx context.Context) ([]string, error) {
-	var allTags []string
-	path := "/tags/list"
-
-	for {
-		resp, err := c.Request(ctx, "GET", path, nil, "")
-		if err != nil {
-			return nil, err
-		}
-
-		if resp.StatusCode != http.StatusOK {
-			resp.Body.Close()
-			return nil, fmt.Errorf("failed to list tags: HTTP %d", resp.StatusCode)
-		}
-
-		var res struct {
-			Tags []string `json:"tags"`
-		}
-		if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
-			resp.Body.Close()
-			return nil, err
-		}
-		resp.Body.Close()
-
-		allTags = append(allTags, res.Tags...)
-
-		link := resp.Header.Get("Link")
-		if link == "" {
-			break
-		}
-
-		next := parseNextLink(link)
-		if next == "" {
-			break
-		}
-		path = next
-		if !strings.HasPrefix(path, "/") {
-			path = "/" + path
-		}
+func NewStderrProgressNotifier() *StderrProgressNotifier {
+	return &StderrProgressNotifier{
+		isTTY:      term.IsTerminal(int(os.Stderr.Fd())),
+		lastBucket: -1,
 	}
-
-	return allTags, nil
 }
 
-func parseNextLink(link string) string {
-	for _, part := range strings.Split(link, ",") {
-		part = strings.TrimSpace(part)
-		if !strings.Contains(part, `rel="next"`) {
-			continue
-		}
-		start := strings.Index(part, "<")
-		end := strings.Index(part, ">")
-		if start == -1 || end == -1 || end <= start {
-			continue
-		}
-		rawURL := part[start+1 : end]
-		u, err := url.Parse(rawURL)
-		if err != nil {
-			continue
-		}
-		// Only keep the relative endpoint path, stripping /v2/<repo>/nix-cache prefix.
-		path := u.Path
-		q := u.RawQuery
-		if idx := strings.LastIndex(path, "/tags/list"); idx != -1 {
-			path = path[idx:]
-		}
-		if q != "" {
-			return path + "?" + q
-		}
-		return path
+func (n *StderrProgressNotifier) Update(description string, offset, total int64) {
+	if total <= 0 {
+		return
 	}
-	return ""
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	pct := float64(offset) * 100 / float64(total)
+	if n.isTTY {
+		now := time.Now()
+		if n.lastPrint.IsZero() || offset == total || now.Sub(n.lastPrint) >= 200*time.Millisecond {
+			fmt.Fprintf(os.Stderr, "\r\x1b[K▶ [noci] Uploading %s... %.1f%% (%s / %s)", description, pct, FormatSize(offset), FormatSize(total))
+			n.lastPrint = now
+		}
+	} else {
+		bucket := int(pct) / 10
+		for bucket > n.lastBucket {
+			n.lastBucket++
+			fmt.Fprintf(os.Stderr, "▶ [noci] Uploading %s... %d%% (%s / %s)\n", description, n.lastBucket*10, FormatSize(offset), FormatSize(total))
+		}
+	}
 }
 
-// DeleteManifest 策略分流式物理删除
-func (c *Client) DeleteManifest(ctx context.Context, tag string) error {
-	// 尝试符合标准 OCI 协议的 DELETE 请求 (Harbor, GitLab, ECR 支持)
-	resp, err := c.Request(ctx, "DELETE", "/manifests/"+tag, nil, "")
-	if err == nil {
-		defer resp.Body.Close()
-		if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusAccepted || resp.StatusCode == http.StatusNotFound {
-			return nil
-		}
-		// 注册表可能禁用 DELETE：405 Method Not Allowed (GHCR),
-		// 或 401/403 令牌无删除权限 (ECR, Harbor 防护策略)
-		if resp.StatusCode == http.StatusMethodNotAllowed || resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusUnauthorized {
-			return c.fallbackUntagManifest(ctx, tag)
-		}
-		return fmt.Errorf("delete manifest failed: HTTP %d", resp.StatusCode)
+func (n *StderrProgressNotifier) Finish() {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	if n.finished {
+		return
 	}
-	return err
-}
-
-// 重置/覆盖 Tag 指针，达到 logical untagged 物理垃圾悬空
-func (c *Client) fallbackUntagManifest(ctx context.Context, tag string) error {
-	if c.Profile {
-		log.Info("[profile] OCI DELETE blocked (405). Falling back to tag-overwriting (untagging) for tag: %s", tag)
-	}
-
-	// 向原有的 Nix 32位 哈希标签推送一个极小的 Dummy 空清单
-	// 这会立即解绑原先的 NAR Manifest，使其退化为 "untagged" (悬空无标签) 状态。
-	dummyManifest := OCIManifest{
-		SchemaVersion: 2,
-		MediaType:     "application/vnd.oci.image.manifest.v1+json",
-		Config: Descriptor{
-			MediaType: "application/vnd.noci.dummy.config.v1+json",
-			Size:      0,
-			Digest:    "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-		},
-		Annotations: map[string]string{
-			"org.nix.evicted": "true",
-		},
-	}
-
-	return c.PushManifest(ctx, tag, &dummyManifest)
-}
-
-func (c *Client) FetchIndex(ctx context.Context) (*CacheIndex, error) {
-	manifest, err := c.FetchManifest(ctx, "noci-index")
-	if err != nil {
-		if strings.Contains(err.Error(), "HTTP 404") {
-			return NewIndex(c.registry, c.repo), nil
-		}
-		return nil, err
-	}
-
-	if len(manifest.Layers) == 0 {
-		return NewIndex(c.registry, c.repo), nil
-	}
-
-	data, err := c.downloadBlob(ctx, manifest.Layers[0].Digest)
-	if err != nil {
-		return nil, err
-	}
-
-	if len(data) >= 4 && data[0] == 0x28 && data[1] == 0xB5 && data[2] == 0x2F && data[3] == 0xFD {
-		dec, err := zstd.NewReader(nil)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create zstd reader: %w", err)
-		}
-		decoded, err := dec.DecodeAll(data, nil)
-		dec.Close()
-		if err != nil {
-			return nil, fmt.Errorf("failed to decompress zstd index: %w", err)
-		}
-		data = decoded
-	} else if len(data) >= 2 && data[0] == 0x1f && data[1] == 0x8b {
-		gr, err := gzip.NewReader(bytes.NewReader(data))
-		if err != nil {
-			return nil, fmt.Errorf("failed to create gzip reader for index: %w", err)
-		}
-		decoded, err := io.ReadAll(gr)
-		gr.Close()
-		if err != nil {
-			return nil, fmt.Errorf("failed to decompress gzip index: %w", err)
-		}
-		data = decoded
-	}
-
-	var idx CacheIndex
-	if err := json.Unmarshal(data, &idx); err != nil {
-		return nil, err
-	}
-	idx.Upgrade()
-	return &idx, nil
-}
-
-func (c *Client) PushIndex(ctx context.Context, idx *CacheIndex) error {
-	pushStart := time.Now()
-	idx.Generated = time.Now()
-	data, err := json.Marshal(idx)
-	if err != nil {
-		return err
-	}
-
-	enc, err := zstd.NewWriter(nil, zstd.WithEncoderConcurrency(1))
-	if err != nil {
-		return err
-	}
-	compressed := enc.EncodeAll(data, nil)
-	enc.Close()
-
-	tmp, err := os.CreateTemp("", "noci-index-*.zst")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmp.Name())
-
-	h := sha256.New()
-	if _, err := io.Copy(io.MultiWriter(tmp, h), bytes.NewReader(compressed)); err != nil {
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-
-	log.Action("Uploading index...")
-
-	digest, err := c.UploadBlob(ctx, tmp.Name(), hex.EncodeToString(h.Sum(nil)), "index")
-	if err != nil {
-		return err
-	}
-
-	indexManifest := OCIManifest{
-		SchemaVersion: 2,
-		MediaType:     "application/vnd.oci.image.manifest.v1+json",
-		Config: Descriptor{
-			MediaType: "application/vnd.noci.index.config.v1+json",
-			Size:      0,
-			Digest:    "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-		},
-		Layers: []Descriptor{
-			{
-				MediaType: "application/vnd.noci.index.layer.v1+zstd",
-				Digest:    digest,
-				Size:      int64(len(compressed)),
-			},
-		},
-		Annotations: map[string]string{
-			"org.nix.index.generated_at": time.Now().UTC().Format(time.RFC3339),
-		},
-	}
-	if err := c.PushManifest(ctx, "noci-index", &indexManifest); err != nil {
-		return err
-	}
-
-	if c.Profile {
-		log.Info("[profile] PushIndex: total=%v", time.Since(pushStart))
-	}
-	return nil
-}
-
-func (c *Client) UploadBlob(ctx context.Context, filePath, sha256Hex, description string) (string, error) {
-	digest := "sha256:" + sha256Hex
-
-	headResp, err := c.Request(ctx, "HEAD", "/blobs/"+digest, nil, "")
-	if err == nil && headResp.StatusCode == http.StatusOK {
-		return digest, nil
-	}
-
-	initResp, err := c.Request(ctx, "POST", "/blobs/uploads/", nil, "")
-	if err != nil {
-		return "", err
-	}
-	defer initResp.Body.Close()
-
-	if initResp.StatusCode != http.StatusAccepted && initResp.StatusCode != http.StatusCreated {
-		bodyBytes, _ := io.ReadAll(initResp.Body)
-		return "", fmt.Errorf("failed to initiate blob upload (HTTP %d): %s", initResp.StatusCode, string(bodyBytes))
-	}
-
-	uploadURL := initResp.Header.Get("Location")
-	if uploadURL == "" {
-		return "", fmt.Errorf("registry didn't return upload location")
-	}
-
-	u, err := url.Parse(uploadURL)
-	if err != nil {
-		return "", fmt.Errorf("invalid upload location URL: %w", err)
-	}
-
-	if !u.IsAbs() {
-		base, _ := url.Parse(fmt.Sprintf("https://%s", c.registry))
-		u = base.ResolveReference(u)
-	}
-
-	q := u.Query()
-	q.Set("digest", digest)
-	u.RawQuery = q.Encode()
-	uploadURL = u.String()
-
-	file, err := os.Open(filePath)
-	if err != nil {
-		return "", err
-	}
-	defer file.Close()
-
-	stat, _ := file.Stat()
-
-	pr := newProgressReader(file, stat.Size(), description)
-	token, _ := c.getOciToken(ctx, "pull,push")
-
-	var putResp *http.Response
-	const maxRetries = 3
-	backoff := time.Second
-	for attempt := 0; attempt <= maxRetries; attempt++ {
-		// Re-open file for retry (io.Reader consumed on first attempt)
-		if attempt > 0 {
-			file.Seek(0, io.SeekStart)
-			pr = newProgressReader(file, stat.Size(), description)
-			freshToken, tokenErr := c.getOciToken(ctx, "pull,push")
-			if tokenErr != nil {
-				fmt.Println()
-				return "", fmt.Errorf("refresh token for upload PUT: %w", tokenErr)
-			}
-			token = freshToken
-		}
-
-		req, err := http.NewRequestWithContext(ctx, "PUT", uploadURL, pr)
-		if err != nil {
-			fmt.Println()
-			return "", err
-		}
-		req.Header.Set("Authorization", "Bearer "+token)
-		req.Header.Set("Content-Type", "application/octet-stream")
-		req.ContentLength = stat.Size()
-
-		putResp, err = c.client.Do(req)
-		if err == nil && putResp.StatusCode < 500 {
-			break
-		}
-		if putResp != nil {
-			putResp.Body.Close()
-		}
-		if attempt < maxRetries {
-			time.Sleep(backoff)
-			backoff *= 2
-		}
-	}
-	if err != nil {
-		fmt.Println()
-		return "", err
-	}
-	defer putResp.Body.Close()
-
-	if putResp.StatusCode != http.StatusCreated && putResp.StatusCode != http.StatusAccepted {
-		fmt.Println()
-		bodyBytes, _ := io.ReadAll(putResp.Body)
-		return "", fmt.Errorf("failed to complete upload: HTTP %d, %s", putResp.StatusCode, string(bodyBytes))
-	}
-
-	fmt.Printf("\r\x1b[K✔ [noci] Uploaded %s (%s).\n", description, FormatSize(stat.Size()))
-	return digest, nil
-}
-
-func (c *Client) UploadBlobMonolithic(ctx context.Context, filePath, sha256Hex, description string) (digest string, size int64, err error) {
-	uploadStart := time.Now()
-
-	digest = "sha256:" + sha256Hex
-
-	file, err := os.Open(filePath)
-	if err != nil {
-		return "", 0, fmt.Errorf("failed to open blob file: %w", err)
-	}
-	defer file.Close()
-
-	stat, err := file.Stat()
-	if err != nil {
-		return "", 0, fmt.Errorf("failed to stat blob file: %w", err)
-	}
-	size = stat.Size()
-
-	headCtx, headCancel := context.WithTimeout(ctx, 30*time.Second)
-	defer headCancel()
-	if headResp, headErr := c.Request(headCtx, "HEAD", "/blobs/"+digest, nil, ""); headErr == nil {
-		headResp.Body.Close()
-		if headResp.StatusCode == http.StatusOK {
-			if c.Profile {
-				log.Info("[profile] Blob %s already exists (HEAD), skipped", sha256Hex[:12])
-			}
-			return digest, size, nil
-		}
-	} else if headResp != nil {
-		headResp.Body.Close()
-	}
-
-	token, err := c.getOciToken(ctx, "pull,push")
-	if err != nil {
-		return "", 0, err
-	}
-
-	initResp, err := c.Request(ctx, "POST", "/blobs/uploads/", nil, "")
-	if err != nil {
-		return "", 0, err
-	}
-	defer initResp.Body.Close()
-
-	if initResp.StatusCode != http.StatusAccepted && initResp.StatusCode != http.StatusCreated {
-		bodyBytes, _ := io.ReadAll(initResp.Body)
-		return "", 0, fmt.Errorf("failed to initiate blob upload (HTTP %d): %s", initResp.StatusCode, string(bodyBytes))
-	}
-
-	uploadLocation := initResp.Header.Get("Location")
-	if uploadLocation == "" {
-		return "", 0, fmt.Errorf("registry didn't return upload location")
-	}
-
-	u, err := url.Parse(uploadLocation)
-	if err != nil {
-		return "", 0, fmt.Errorf("invalid upload location URL: %w", err)
-	}
-	if !u.IsAbs() {
-		base, _ := url.Parse(fmt.Sprintf("https://%s", c.registry))
-		u = base.ResolveReference(u)
-	}
-	uploadURL := u.String()
-
-	uploadURL += "?digest=" + digest
-
-	var putResp *http.Response
-	var netTime time.Duration
-	const maxRetries = 3
-	backoff := time.Second
-	for attempt := 0; attempt <= maxRetries; attempt++ {
-		// Re-open file for retry
-		if attempt > 0 {
-			file.Seek(0, io.SeekStart)
-			freshToken, tokenErr := c.getOciToken(ctx, "pull,push")
-			if tokenErr != nil {
-				return "", 0, fmt.Errorf("refresh token for monolithic upload: %w", tokenErr)
-			}
-			token = freshToken
-		}
-
-		body := newProgressReader(file, size, description)
-
-		putReq, err := http.NewRequestWithContext(ctx, "PUT", uploadURL, body)
-		if err != nil {
-			return "", 0, fmt.Errorf("failed to create PUT request: %w", err)
-		}
-		putReq.Header.Set("Authorization", "Bearer "+token)
-		putReq.Header.Set("Content-Type", "application/octet-stream")
-		putReq.ContentLength = size
-
-		startNet := time.Now()
-		putResp, err = c.client.Do(putReq)
-		netTime = time.Since(startNet)
-
-		if err == nil && putResp.StatusCode < 500 {
-			break
-		}
-		if putResp != nil {
-			putResp.Body.Close()
-		}
-		if attempt < maxRetries {
-			time.Sleep(backoff)
-			backoff *= 2
-		}
-	}
-	if err != nil {
-		return "", 0, fmt.Errorf("monolithic upload failed: %w", err)
-	}
-	defer putResp.Body.Close()
-
-	if putResp.StatusCode != http.StatusCreated && putResp.StatusCode != http.StatusAccepted {
-		bodyBytes, _ := io.ReadAll(putResp.Body)
-		return "", 0, fmt.Errorf("monolithic upload failed: HTTP %d, %s", putResp.StatusCode, string(bodyBytes))
-	}
-
-	if c.Profile {
-		totalElapsed := time.Since(uploadStart)
-		log.Info("[profile] Upload %s: total=%v net=%v (net %.1f%%) size=%s",
-			description, totalElapsed, netTime,
-			float64(netTime)/float64(totalElapsed)*100,
-			FormatSize(size))
-	}
-
-	return digest, size, nil
-}
-
-func (c *Client) UploadBlobChunked(ctx context.Context, filePath, sha256Hex, description string, chunkSize int64) (string, error) {
-	digest := "sha256:" + sha256Hex
-
-	// HEAD check — skip upload if blob already exists
-	headResp, err := c.Request(ctx, "HEAD", "/blobs/"+digest, nil, "")
-	if err == nil && headResp.StatusCode == http.StatusOK {
-		headResp.Body.Close()
-		return digest, nil
-	}
-	if headResp != nil {
-		headResp.Body.Close()
-	}
-
-	// POST to initiate chunked upload session
-	initResp, err := c.Request(ctx, "POST", "/blobs/uploads/", nil, "")
-	if err != nil {
-		return "", err
-	}
-	defer initResp.Body.Close()
-
-	if initResp.StatusCode != http.StatusAccepted && initResp.StatusCode != http.StatusCreated {
-		bodyBytes, _ := io.ReadAll(initResp.Body)
-		return "", fmt.Errorf("failed to initiate chunked upload (HTTP %d): %s", initResp.StatusCode, string(bodyBytes))
-	}
-
-	location := initResp.Header.Get("Location")
-	if location == "" {
-		return "", fmt.Errorf("registry didn't return upload location")
-	}
-
-	u, err := url.Parse(location)
-	if err != nil {
-		return "", fmt.Errorf("invalid upload location URL: %w", err)
-	}
-	if !u.IsAbs() {
-		base, _ := url.Parse(fmt.Sprintf("https://%s", c.registry))
-		u = base.ResolveReference(u)
-	}
-
-	file, err := os.Open(filePath)
-	if err != nil {
-		return "", err
-	}
-	defer file.Close()
-
-	stat, err := file.Stat()
-	if err != nil {
-		return "", err
-	}
-	totalSize := stat.Size()
-
-	isTTY := term.IsTerminal(int(os.Stderr.Fd()))
-	lastPrint := time.Time{}
-	lastBucket := -1
-
-	// PATCH loop — upload chunks with Content-Range and per-chunk retry
-	var offset int64
-	totalChunks := (totalSize + chunkSize - 1) / chunkSize
-	var chunkNum int64
-	buf := make([]byte, chunkSize)
-	for offset < totalSize {
-		n, readErr := file.Read(buf)
-		if n > 0 {
-			chunkStart := offset
-			chunkEnd := offset + int64(n) - 1 // OCI closed interval
-
-			var resp *http.Response
-			const maxRetries = 3
-			backoff := time.Second
-			var patchErr error
-
-			for attempt := 0; attempt <= maxRetries; attempt++ {
-				select {
-				case <-ctx.Done():
-					return "", ctx.Err()
-				default:
-				}
-
-				// On retry, seek back and re-read the chunk
-				if attempt > 0 {
-					if _, seekErr := file.Seek(chunkStart, io.SeekStart); seekErr != nil {
-						return "", fmt.Errorf("seek for chunk retry: %w", seekErr)
-					}
-					if _, rErr := io.ReadFull(file, buf[:n]); rErr != nil {
-						return "", fmt.Errorf("re-read chunk: %w", rErr)
-					}
-				}
-
-				freshToken, tokenErr := c.getOciToken(ctx, "pull,push")
-				if tokenErr != nil {
-					return "", fmt.Errorf("get token: %w", tokenErr)
-				}
-
-				// Use Location URL as-is — never manipulate query params (registry session tokens are sacred)
-				req, err := http.NewRequestWithContext(ctx, "PATCH", u.String(), bytes.NewReader(buf[:n]))
-				if err != nil {
-					return "", err
-				}
-				req.Header.Set("Authorization", "Bearer "+freshToken)
-				req.Header.Set("Content-Type", "application/octet-stream")
-				req.Header.Set("Content-Length", strconv.Itoa(n))
-				req.Header.Set("Content-Range", fmt.Sprintf("%d-%d", chunkStart, chunkEnd))
-				req.ContentLength = int64(n)
-
-				resp, err = c.client.Do(req)
-				if err == nil {
-					if resp.StatusCode == http.StatusAccepted || resp.StatusCode == http.StatusCreated || resp.StatusCode == http.StatusOK {
-						patchErr = nil
-						break
-					}
-					if resp.StatusCode < 500 {
-						bodyBytes, _ := io.ReadAll(resp.Body)
-						resp.Body.Close()
-						return "", fmt.Errorf("PATCH failed at offset %d: HTTP %d, %s", chunkStart, resp.StatusCode, string(bodyBytes))
-					}
-					resp.Body.Close()
-					patchErr = fmt.Errorf("server error HTTP %d at offset %d", resp.StatusCode, chunkStart)
-				} else {
-					patchErr = err
-				}
-
-				if attempt < maxRetries {
-					time.Sleep(backoff)
-					backoff *= 2
-				}
-			}
-			if patchErr != nil {
-				return "", fmt.Errorf("PATCH failed after retries: %w", patchErr)
-			}
-
-			// Update Location from response — trust the registry's next URL verbatim
-			newLoc := resp.Header.Get("Location")
-			resp.Body.Close()
-			if newLoc != "" {
-				newU, err := url.Parse(newLoc)
-				if err == nil {
-					if !newU.IsAbs() {
-						base, _ := url.Parse(fmt.Sprintf("https://%s", c.registry))
-						newU = base.ResolveReference(newU)
-					}
-					u = newU
-				}
-			}
-
-			offset += int64(n)
-
-			chunkNum++
-		// Progress reporting
-			pct := float64(offset) * 100 / float64(totalSize)
-			if isTTY {
-				now := time.Now()
-				if lastPrint.IsZero() || offset == totalSize || now.Sub(lastPrint) >= 200*time.Millisecond {
-					fmt.Fprintf(os.Stderr, "\r\x1b[K\u25b6 [noci] Uploading %s... %.1f%% (%s / %s) [chunk %d/%d]", description, pct, FormatSize(offset), FormatSize(totalSize), chunkNum, totalChunks)
-					lastPrint = now
-				}
-			} else {
-				bucket := int(pct) / 10
-				for bucket > lastBucket {
-					lastBucket++
-					fmt.Fprintf(os.Stderr, "\u25b6 [noci] Uploading %s... %d%% (%s / %s) [chunk %d/%d]\n", description, lastBucket*10, FormatSize(offset), FormatSize(totalSize), chunkNum, totalChunks)
-				}
-			}
-		}
-		if readErr != nil {
-			if readErr != io.EOF {
-				return "", readErr
-			}
-			break
-		}
-	}
-
-	if isTTY {
+	n.finished = true
+	if n.isTTY {
 		fmt.Fprintln(os.Stderr)
 	}
-
-	// Final PUT — commit the upload with digest, retry with fresh token
-	finalURL := u.String()
-	if strings.Contains(finalURL, "?") {
-		finalURL += "&digest=" + digest
-	} else {
-		finalURL += "?digest=" + digest
-	}
-
-	var putResp *http.Response
-	const maxRetries = 3
-	backoff := time.Second
-	for attempt := 0; attempt <= maxRetries; attempt++ {
-		select {
-		case <-ctx.Done():
-			return "", ctx.Err()
-		default:
-		}
-
-		freshToken, tokenErr := c.getOciToken(ctx, "pull,push")
-		if tokenErr != nil {
-			return "", fmt.Errorf("refresh token for final PUT: %w", tokenErr)
-		}
-
-		putReq, err := http.NewRequestWithContext(ctx, "PUT", finalURL, nil)
-		if err != nil {
-			return "", err
-		}
-		putReq.Header.Set("Authorization", "Bearer "+freshToken)
-		putReq.Header.Set("Content-Type", "application/octet-stream")
-		putReq.Header.Set("Content-Length", "0")
-
-		putResp, err = c.client.Do(putReq)
-		if err == nil && putResp.StatusCode < 500 {
-			break
-		}
-		if putResp != nil {
-			putResp.Body.Close()
-		}
-		if attempt < maxRetries {
-			time.Sleep(backoff)
-			backoff *= 2
-		}
-	}
-	if err != nil {
-		return "", fmt.Errorf("final PUT failed: %w", err)
-	}
-	defer putResp.Body.Close()
-
-	if putResp.StatusCode != http.StatusCreated && putResp.StatusCode != http.StatusAccepted && putResp.StatusCode != http.StatusOK {
-		bodyBytes, _ := io.ReadAll(putResp.Body)
-		return "", fmt.Errorf("final PUT failed: HTTP %d, %s", putResp.StatusCode, string(bodyBytes))
-	}
-
-	return digest, nil
 }
 
-func (c *Client) downloadBlob(ctx context.Context, digest string) ([]byte, error) {
-	resp, err := c.Request(ctx, "GET", "/blobs/"+digest, nil, "")
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("blob %s not found: HTTP %d", digest, resp.StatusCode)
-	}
-	return io.ReadAll(resp.Body)
-}
+// NoopProgressNotifier discards all progress updates.
+type NoopProgressNotifier struct{}
 
-func (c *Client) DeleteBlob(ctx context.Context, digest string) error {
-	resp, err := c.Request(ctx, "DELETE", "/blobs/"+digest, nil, "")
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
+func (n *NoopProgressNotifier) Update(string, int64, int64) {}
+func (n *NoopProgressNotifier) Finish()                     {}
 
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted && resp.StatusCode != http.StatusNotFound {
-		bodyBytes, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("failed to delete blob %s (HTTP %d): %s", digest, resp.StatusCode, string(bodyBytes))
-	}
-	return nil
-}
-
-type progressReader struct {
-	r           io.Reader
-	total       int64
-	done        int64
-	description string
-	isTTY       bool
-	lastPrint   time.Time
-	lastBucket  int
-	cursorReset bool // 防止高频调用时发生多重 Terminal 回车
-}
-
-// 针对 os.Stderr 检测 TTY 属性，因为进度 UI 条作为诊断状态信息应当输出到标准错误流（Stderr）
-func newProgressReader(r io.Reader, total int64, description string) *progressReader {
-	isTTY := term.IsTerminal(int(os.Stderr.Fd()))
-	return &progressReader{
-		r:           r,
-		total:       total,
-		description: description,
-		isTTY:       isTTY,
-		lastBucket:  -1, // 初始化为 -1 确保 0% 桶在起始被触发时能够正常输出
-	}
-}
-
-func (pr *progressReader) Read(p []byte) (int, error) {
-	n, err := pr.r.Read(p)
-	pr.done += int64(n)
-	if pr.total > 0 {
-		pct := float64(pr.done) * 100 / float64(pr.total)
-
-		if pr.isTTY {
-			// 物理 TTY 终端环境，采用 200ms 高频刷屏覆盖，并将 UI 信息安全重定向输出至 Stderr
-			now := time.Now()
-			if pr.lastPrint.IsZero() || pr.done == pr.total || err != nil || now.Sub(pr.lastPrint) >= 200*time.Millisecond {
-				fmt.Fprintf(os.Stderr, "\r\x1b[K▶ [noci] Uploading %s... %.1f%% (%s / %s)", pr.description, pct, FormatSize(pr.done), FormatSize(pr.total))
-				pr.lastPrint = now
-			}
-
-			// 上传彻底结束时，向 Stderr 补打一个回车换行
-			if pr.done == pr.total && !pr.cursorReset {
-				fmt.Fprintln(os.Stderr)
-				pr.cursorReset = true
-			}
-		} else {
-			// 非 TTY 终端（CI 管道、重定向、管道、tee），采用滑动桶（for 步长递增）补齐方案
-			bucket := int(pct) / 10
-			for bucket > pr.lastBucket {
-				pr.lastBucket++
-				fmt.Fprintf(os.Stderr, "▶ [noci] Uploading %s... %d%% (%s / %s)\n", pr.description, pr.lastBucket*10, FormatSize(pr.done), FormatSize(pr.total))
-			}
-		}
-	}
-	return n, err
-}
-
+// FormatSize formats bytes into human-readable size strings.
 func FormatSize(b int64) string {
 	const unit = 1024
 	if b < unit {

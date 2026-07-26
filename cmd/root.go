@@ -11,7 +11,7 @@ import (
 
 var (
 	jsonOutput bool
-	verbosity int
+	verbosity  int
 	quietMode  bool
 )
 
@@ -39,9 +39,14 @@ func init() {
 	RootCmd.PersistentFlags().BoolVar(&jsonOutput, "json", false, "Output logs as structured JSON lines")
 	RootCmd.PersistentFlags().CountVarP(&verbosity, "verbose", "v", "Increase verbosity (-v info, -vv debug)")
 	RootCmd.PersistentFlags().BoolVarP(&quietMode, "quiet", "q", false, "Suppress non-essential output")
+
 	RootCmd.AddCommand(pushCmd)
 	RootCmd.AddCommand(proxyCmd)
 	RootCmd.AddCommand(searchCmd)
+	RootCmd.AddCommand(gcCmd)
+	RootCmd.AddCommand(pinCmd)
+	RootCmd.AddCommand(unpinCmd)
+	RootCmd.AddCommand(indexCmd)
 	RootCmd.AddCommand(&cobra.Command{
 		Use:       "completion [bash|zsh|fish|powershell]",
 		Short:     "Generate shell completion scripts",

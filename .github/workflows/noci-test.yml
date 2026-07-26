@@ -11,9 +11,20 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.x"
+
+      - name: Build noci binary
+        run: go build -o ./action/noci .
 
       - name: Install Nix
         uses: cachix/install-nix-action@v30
@@ -21,7 +32,7 @@ jobs:
       - name: Setup noci binary cache
         uses: ./action
         with:
-          repo: ${{ secrets.NOCI_REPO || 'lonerOrz/noci-cache' }}
+          repo: ${{ secrets.NOCI_REPO || github.repository }}
           signing-key: ${{ secrets.NOCI_SIGNING_KEY }}
           token: ${{ secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
 
@@ -33,15 +44,8 @@ jobs:
         run: |
           nix build github:lonerOrz/loneros-nur#wooz --no-link -L
 
-      - name: Build and Time Upload Real ISO
+      - name: Build and Push ISO
         run: |
           ISO_PATH=$(nix build github:lonerOrz/loneros-nixos#packages.x86_64-linux.iso --print-out-paths --no-link -L)
-
           nix path-info -sh "$ISO_PATH"
-
           go run . push "$ISO_PATH" --profile
-        env:
-          NOCI_REGISTRY: ${{ secrets.NOCI_REGISTRY || 'ghcr.io' }}
-          NOCI_REPO: ${{ secrets.NOCI_REPO || 'lonerOrz/noci-cache' }}
-          NOCI_SIGNING_KEY: ${{ secrets.NOCI_SIGNING_KEY }}
-          NOCI_TOKEN: ${{ secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}

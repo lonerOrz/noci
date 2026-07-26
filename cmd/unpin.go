@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"noci/pkg/config"
 	"noci/pkg/log"
 	"noci/pkg/oci"
 
@@ -13,27 +14,25 @@ var unpinFlags CommonFlags
 var unpinCmd = &cobra.Command{
 	Use:   "unpin [paths or 32-char hashes...]",
 	Short: "Unpin specific packages in the OCI cache to allow them to be garbage collected",
-	RunE:  runUnpin,
+	Long: `Remove pin protection from one or more packages, making them eligible for
+garbage collection. Accepts store paths or 32-char Nix hashes.`,
+	Args: cobra.MinimumNArgs(1),
+	RunE: runUnpin,
 }
 
 func init() {
 	unpinFlags.Register(unpinCmd)
-	RootCmd.AddCommand(unpinCmd)
 }
 
 func runUnpin(cmd *cobra.Command, args []string) error {
-	if len(args) == 0 {
-		return fmt.Errorf("no paths or hashes specified to unpin")
-	}
-
 	ctx := cmd.Context()
 	cfg, err := unpinFlags.Resolve()
 	if err != nil {
 		return err
 	}
 
-	// 统一利用 resolveHashes 解析（策略上强制禁止 unpin 触发本地构建，提升效率）
-	inputHashes, err := resolveHashes(ctx, args, false)
+	// Resolve inputs: no nix build fallback.
+	inputHashes, err := config.ResolveHashes(ctx, args, false)
 	if err != nil {
 		return err
 	}
@@ -41,7 +40,7 @@ func runUnpin(cmd *cobra.Command, args []string) error {
 	client := oci.NewClient(cfg.Registry, cfg.Repo, cfg.Token)
 	index, err := client.FetchIndex(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to fetch index: %w", err)
+		return fmt.Errorf("fetch index: %w", err)
 	}
 
 	modified := false
@@ -64,7 +63,7 @@ func runUnpin(cmd *cobra.Command, args []string) error {
 
 	log.Action("Saving updated index back to OCI...")
 	if err := client.PushIndex(ctx, index); err != nil {
-		return fmt.Errorf("failed to push index: %w", err)
+		return fmt.Errorf("push index: %w", err)
 	}
 
 	return nil

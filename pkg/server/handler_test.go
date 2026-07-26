@@ -7,15 +7,16 @@ import (
 	"net/http/httptest"
 	"noci/pkg/oci"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestHealthz_IndexLoaded(t *testing.T) {
 	s := &Server{
-		upstream: "https://cache.nixos.org",
+		upstream:  "https://cache.nixos.org",
 		canDelete: true,
 	}
-	// Simulate loaded index
 	s.indexMu.Lock()
 	s.index = &oci.CacheIndex{
 		Entries: map[string]oci.IndexItem{
@@ -49,7 +50,7 @@ func TestHealthz_IndexLoaded(t *testing.T) {
 		t.Errorf("EntryCount = %d, want 2", resp.EntryCount)
 	}
 	if resp.LastDigest != "sha256:abcdef12" {
-		t.Errorf("LastDigest = %q", resp.LastDigest)
+		t.Errorf("LastDigest = %q, want sha256:abcdef12", resp.LastDigest)
 	}
 	if !resp.CanDelete {
 		t.Error("CanDelete should be true")
@@ -113,7 +114,7 @@ func TestStreamBlob_RedirectHandling(t *testing.T) {
 	client := oci.NewClient(registry, "user/repo", "test-token")
 	client.SetHTTPClient(mockServer.Client())
 
-	s := &Server{client: client}
+	s := &Server{client: client, rawClient: client}
 
 	codes := []int{
 		http.StatusMovedPermanently,
@@ -135,5 +136,66 @@ func TestStreamBlob_RedirectHandling(t *testing.T) {
 		if got := w.Header().Get("Location"); got != location {
 			t.Errorf("redirect %d: Location = %q, want %q", code, got, location)
 		}
+	}
+}
+
+func TestHandleNarInfoRoute_CacheHit(t *testing.T) {
+	s := &Server{
+		negCache: sync.Map{},
+	}
+	s.indexMu.Lock()
+	s.index = &oci.CacheIndex{
+		Entries: map[string]oci.IndexItem{
+			"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+				Name:      "test-pkg",
+				NarInfo:   "StorePath: /nix/store/abc-test-pkg\nURL: nar/old-hash.nar.gz\n",
+				NarDigest: "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+			},
+		},
+	}
+	s.indexMu.Unlock()
+
+	s.cacheSvc = newCacheService(s)
+
+	req := httptest.NewRequest("GET", "/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.narinfo", nil)
+	req.SetPathValue("hash", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	w := httptest.NewRecorder()
+
+	s.handleNarInfoRoute(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200", w.Code)
+	}
+	body := w.Body.String()
+	// The rewrite should replace the URL with nar/<sha256>.nar.gz
+	expectedURL := "URL: nar/1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef.nar.gz"
+	if !strings.Contains(body, expectedURL) {
+		t.Errorf("URL was not rewritten correctly, body:\n%s", body)
+	}
+}
+
+func TestHandleNarInfoRoute_CacheMiss(t *testing.T) {
+	s := &Server{
+		negCache:       sync.Map{},
+		upstream:       "https://cache.nixos.org",
+		cb:             NewCircuitBreaker(5, 30*time.Second),
+		upstreamProxy:  nil,
+		upstreamExtras: nil,
+	}
+	s.indexMu.Lock()
+	s.index = &oci.CacheIndex{Entries: map[string]oci.IndexItem{}}
+	s.indexMu.Unlock()
+
+	s.cacheSvc = newCacheService(s)
+
+	req := httptest.NewRequest("GET", "/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.narinfo", nil)
+	req.SetPathValue("hash", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+	w := httptest.NewRecorder()
+
+	s.handleNarInfoRoute(w, req)
+
+	// Should fall through to upstream — we get 404 or upstream response
+	if w.Code == http.StatusOK {
+		t.Error("cache miss should not return 200")
 	}
 }

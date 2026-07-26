@@ -1,329 +1,38 @@
 package cmd
 
 import (
-	"context"
-	"encoding/base64"
-	"encoding/json"
-	"fmt"
-	"noci/pkg/log"
-	"noci/pkg/nix"
-	"os"
-	"path/filepath"
-	"regexp"
-	"strconv"
-	"strings"
-	"time"
+	"noci/pkg/config"
 
 	"github.com/spf13/cobra"
-	"gopkg.in/yaml.v3"
 )
 
-type OCIConfig struct {
-	Registry string
-	Repo     string
-	Token    string
-}
-
-// RegistryEntry is a single registry target for multi-registry support.
-type RegistryEntry struct {
-	Registry string
-	Repo     string
-	Token    string
-}
-
-// RegistryTarget is a single registry entry in YAML config.
-type RegistryTarget struct {
-	Name     string `yaml:"name"`
-	Registry string `yaml:"registry"`
-	Repo     string `yaml:"repo"`
-	Token    string `yaml:"token"`
-	Mode     string `yaml:"mode"` // "push-pull" (default), "push-only", "pull-only"
-}
-
-// NociConfig represents the optional YAML configuration file.
-type NociConfig struct {
-	Registry   string           `yaml:"registry"`
-	Repo       string           `yaml:"repo"`
-	Token      string           `yaml:"token"`
-	Registries []RegistryTarget `yaml:"registries"`
-}
-
-func configFilePaths() []string {
-	home, _ := os.UserHomeDir()
-	return []string{
-		filepath.Join(home, ".config", "noci", "config.yaml"),
-		filepath.Join(home, ".config", "noci", "config.yml"),
-		"noci.yaml",
-		"noci.yml",
-	}
-}
-
-func loadNociConfig() (*NociConfig, error) {
-	for _, path := range configFilePaths() {
-		data, err := os.ReadFile(path)
-		if err == nil {
-			var cfg NociConfig
-			if err := yaml.Unmarshal(data, &cfg); err != nil {
-				return nil, fmt.Errorf("failed to parse %s: %w", path, err)
-			}
-			return &cfg, nil
-		}
-	}
-	return nil, fmt.Errorf("no config file found")
-}
-
-// ResolveRegistries merges --registries flags with YAML config and falls back to single registry.
-func ResolveRegistries(values []string, base OCIConfig) ([]RegistryEntry, error) {
-	if len(values) > 0 {
-		return ParseRegistries(values, base)
-	}
-
-	cfg, err := loadNociConfig()
-	if err != nil && len(values) == 0 {
-		return []RegistryEntry{{Registry: base.Registry, Repo: base.Repo, Token: base.Token}}, nil
-	}
-
-	if err == nil && len(cfg.Registries) > 0 {
-		var entries []RegistryEntry
-		for _, rt := range cfg.Registries {
-			if rt.Mode == "pull-only" {
-				continue
-			}
-			token := rt.Token
-			if token == "" {
-				token = os.Getenv("NOCI_TOKEN")
-			}
-			entries = append(entries, RegistryEntry{
-				Registry: rt.Registry,
-				Repo:     rt.Repo,
-				Token:    token,
-			})
-		}
-		if len(entries) > 0 {
-			return entries, nil
-		}
-	}
-
-	return []RegistryEntry{{Registry: base.Registry, Repo: base.Repo, Token: base.Token}}, nil
-}
-
-var sizeRegex = regexp.MustCompile(`^(\d+)\s*(B|KB|MB|GB|TB|K|M|G|T)?$`)
-
-var nixHashRegex = regexp.MustCompile(`^[0-9abcdfghijklmnpqrsvwxyz]{32}$`)
-
+// CommonFlags holds shared CLI flags for OCI registry configuration.
 type CommonFlags struct {
-	Repo     string
-	Registry string
+	Repo            string
+	Registry        string
+	ExtraRegistries []string
 }
 
+// Register adds common flags to the given command.
 func (cf *CommonFlags) Register(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&cf.Repo, "repo", "", "OCI repository (e.g. username/repo)")
 	cmd.Flags().StringVar(&cf.Registry, "registry", "ghcr.io", "OCI registry endpoint")
 }
 
-func (cf *CommonFlags) Resolve() (OCIConfig, error) {
-	registry := cf.Registry
-	if registry == "" {
-		registry = os.Getenv("NOCI_REGISTRY")
-	}
-	if registry == "" {
-		registry = "ghcr.io"
-	}
-
-	repo := cf.Repo
-	if repo == "" {
-		repo = os.Getenv("NOCI_REPO")
-	}
-	if repo == "" && os.Getenv("GITHUB_ACTIONS") == "true" {
-		repo = os.Getenv("GITHUB_REPOSITORY")
-	}
-	if repo == "" {
-		return OCIConfig{}, fmt.Errorf("repository is required (specify via --repo or NOCI_REPO/GITHUB_REPOSITORY env)")
-	}
-
-	token := os.Getenv("NOCI_TOKEN")
-	if token == "" {
-		token = os.Getenv("GITHUB_TOKEN")
-	}
-	if token == "" {
-		token = os.Getenv("GH_TOKEN")
-	}
-	if token == "" {
-		token = readDockerConfigToken(registry)
-	}
-
-	return OCIConfig{
-		Registry: registry,
-		Repo:     repo,
-		Token:    token,
-	}, nil
+// ResolveConfig resolves flags, env vars, git remote, and tokens into a full config.
+func (cf *CommonFlags) ResolveConfig() (*config.Config, error) {
+	return config.Load(config.Options{
+		Registry:        cf.Registry,
+		Repo:            cf.Repo,
+		ExtraRegistries: cf.ExtraRegistries,
+	})
 }
 
-// ParseRegistries parses --registries flag values ("registry/repo") into RegistryEntry list.
-// Falls back to single OCIConfig if no extra registries are specified.
-func ParseRegistries(values []string, base OCIConfig) ([]RegistryEntry, error) {
-	if len(values) == 0 {
-		return []RegistryEntry{{Registry: base.Registry, Repo: base.Repo, Token: base.Token}}, nil
-	}
-	var entries []RegistryEntry
-	for _, v := range values {
-		parts := strings.SplitN(v, "/", 2)
-		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-			return nil, fmt.Errorf("invalid registry format %q (expected registry/repo)", v)
-		}
-		token := os.Getenv("NOCI_TOKEN")
-		if token == "" {
-			token = os.Getenv("GITHUB_TOKEN")
-		}
-		entries = append(entries, RegistryEntry{Registry: parts[0], Repo: parts[1], Token: token})
-	}
-	return entries, nil
-}
-
-func readDockerConfigToken(registry string) string {
-	home, err := os.UserHomeDir()
+// Resolve resolves flags, env vars, git remote, and tokens into the primary registry target.
+func (cf *CommonFlags) Resolve() (config.Target, error) {
+	cfg, err := cf.ResolveConfig()
 	if err != nil {
-		return ""
+		return config.Target{}, err
 	}
-	data, err := os.ReadFile(home + "/.docker/config.json")
-	if err != nil {
-		return ""
-	}
-	var cfg struct {
-		Auths map[string]struct {
-			Auth string `json:"auth"`
-		} `json:"auths"`
-	}
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return ""
-	}
-	entry, ok := cfg.Auths[registry]
-	if !ok {
-		entry, ok = cfg.Auths["https://"+registry]
-	}
-	if !ok {
-		entry, ok = cfg.Auths["http://"+registry]
-	}
-	if !ok || entry.Auth == "" {
-		return ""
-	}
-	decoded, err := base64.StdEncoding.DecodeString(entry.Auth)
-	if err != nil {
-		return ""
-	}
-	parts := strings.SplitN(string(decoded), ":", 2)
-	if len(parts) != 2 {
-		return ""
-	}
-	return parts[1]
-}
-
-// 统一解析输入
-func resolveHashes(ctx context.Context, args []string, allowBuild bool) ([]string, error) {
-	var hashes []string
-	for _, arg := range args {
-		// 仅去除两端空格
-		arg = strings.TrimSpace(arg)
-		if arg == "" {
-			continue
-		}
-
-		// 策略 A: 原生 32 位 Nix 哈希格式
-		lowerArg := strings.ToLower(arg)
-		if nixHashRegex.MatchString(lowerArg) {
-			hashes = append(hashes, lowerArg)
-			continue
-		}
-
-		// 策略 B: Nix Store 绝对路径形式
-		if strings.HasPrefix(arg, "/nix/store") {
-			hash := nix.GetPathHash(arg)
-			if hash != "" {
-				hashes = append(hashes, strings.ToLower(hash))
-			}
-			continue
-		}
-
-		// 策略 C: nix build（允许时）或 nix eval --raw（不允许时）
-		if allowBuild {
-			log.Action("Target %q is not a local store path or raw hash. Evaluating via `nix build`...", arg)
-			buildPaths, err := nix.BuildTarget(ctx, arg)
-			if err != nil {
-				return nil, fmt.Errorf("failed to evaluate target %q: %w", arg, err)
-			}
-			for _, path := range buildPaths {
-				hash := nix.GetPathHash(path)
-				if hash != "" {
-					hashes = append(hashes, strings.ToLower(hash))
-				}
-			}
-		} else {
-			log.Action("Target %q is not a local store path or raw hash. Evaluating via `nix eval`...", arg)
-			outPath, err := nix.EvalOutPath(ctx, arg)
-			if err != nil {
-				return nil, fmt.Errorf("target %q is not a valid Nix hash/path, and evaluation failed: %w", arg, err)
-			}
-			hash := nix.GetPathHash(outPath)
-			if hash != "" {
-				hashes = append(hashes, strings.ToLower(hash))
-			} else {
-				return nil, fmt.Errorf("target %q evaluated to invalid store path: %s", arg, outPath)
-			}
-		}
-	}
-	return hashes, nil
-}
-
-// parseTTL converts human-friendly TTL strings to seconds.
-// Supports: "30d", "24h", "90m", "0" (permanent), and Go duration format.
-func parseTTL(ttl string) (int64, error) {
-	cleaned := strings.ToLower(strings.TrimSpace(ttl))
-	if cleaned == "0" {
-		return 0, nil
-	}
-	if strings.HasSuffix(cleaned, "d") {
-		daysStr := strings.TrimSuffix(cleaned, "d")
-		days, err := strconv.ParseInt(daysStr, 10, 64)
-		if err != nil {
-			return 0, fmt.Errorf("invalid day format for TTL: %s", ttl)
-		}
-		return days * 24 * 3600, nil
-	}
-	dur, err := time.ParseDuration(ttl)
-	if err != nil {
-		return 0, fmt.Errorf("failed to parse TTL: %w", err)
-	}
-	return int64(dur.Seconds()), nil
-}
-
-// parseSizeString 解析人类易读的大小限制字符串为字节数
-func parseSizeString(sizeStr string) (int64, error) {
-	sizeStr = strings.ToUpper(strings.TrimSpace(sizeStr))
-	if sizeStr == "" {
-		return 0, nil
-	}
-	matches := sizeRegex.FindStringSubmatch(sizeStr)
-	if len(matches) < 2 {
-		return 0, fmt.Errorf("invalid size format: %s", sizeStr)
-	}
-	val, err := strconv.ParseInt(matches[1], 10, 64)
-	if err != nil {
-		return 0, err
-	}
-	unit := "B"
-	if len(matches) > 2 && matches[2] != "" {
-		unit = matches[2]
-	}
-	switch unit {
-	case "K", "KB":
-		return val * 1024, nil
-	case "M", "MB":
-		return val * 1024 * 1024, nil
-	case "G", "GB":
-		return val * 1024 * 1024 * 1024, nil
-	case "T", "TB":
-		return val * 1024 * 1024 * 1024 * 1024, nil
-	default:
-		return val, nil
-	}
+	return cfg.Primary, nil
 }

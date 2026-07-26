@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"noci/pkg/config"
 	"testing"
 )
 
@@ -22,13 +23,13 @@ func TestParseTTL(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		got, err := parseTTL(tt.input)
+		got, err := config.ParseTTL(tt.input)
 		if (err != nil) != tt.err {
-			t.Errorf("parseTTL(%q) error = %v, wantErr %v", tt.input, err, tt.err)
+			t.Errorf("config.ParseTTL(%q) error = %v, wantErr %v", tt.input, err, tt.err)
 			continue
 		}
 		if got != tt.want {
-			t.Errorf("parseTTL(%q) = %d, want %d", tt.input, got, tt.want)
+			t.Errorf("config.ParseTTL(%q) = %d, want %d", tt.input, got, tt.want)
 		}
 	}
 }
@@ -50,19 +51,19 @@ func TestParseSizeString(t *testing.T) {
 		{"1G", 1024 * 1024 * 1024, false},
 		{"1TB", 1024 * 1024 * 1024 * 1024, false},
 		{"1T", 1024 * 1024 * 1024 * 1024, false},
-		{"5mb", 5 * 1024 * 1024, false}, // lowercase
-		{"  2 GB  ", 2 * 1024 * 1024 * 1024, false}, // whitespace
+		{"5mb", 5 * 1024 * 1024, false},
+		{"  2 GB  ", 2 * 1024 * 1024 * 1024, false},
 		{"abc", 0, true},
 	}
 
 	for _, tt := range tests {
-		got, err := parseSizeString(tt.input)
+		got, err := config.ParseSize(tt.input)
 		if (err != nil) != tt.err {
-			t.Errorf("parseSizeString(%q) error = %v, wantErr %v", tt.input, err, tt.err)
+			t.Errorf("config.ParseSize(%q) error = %v, wantErr %v", tt.input, err, tt.err)
 			continue
 		}
 		if got != tt.want {
-			t.Errorf("parseSizeString(%q) = %d, want %d", tt.input, got, tt.want)
+			t.Errorf("config.ParseSize(%q) = %d, want %d", tt.input, got, tt.want)
 		}
 	}
 }

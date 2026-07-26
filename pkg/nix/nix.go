@@ -36,7 +36,7 @@ func GetPathName(storePath string) string {
 	return base[33:]
 }
 
-// GetClosure 获取输入路径的完整闭包 (Context-Aware)
+// GetClosure returns the full dependency closure for the given store paths.
 func GetClosure(ctx context.Context, paths []string) ([]string, error) {
 	args := append([]string{"--query", "--requisites"}, paths...)
 	cmd := exec.CommandContext(ctx, "nix-store", args...)
@@ -57,7 +57,7 @@ func GetClosure(ctx context.Context, paths []string) ([]string, error) {
 	return closure, nil
 }
 
-// GetPathInfos 批量获取多个路径的元数据（单次 nix 调用）
+// GetPathInfos fetches metadata for multiple store paths in one nix call.
 func GetPathInfos(ctx context.Context, storePaths []string) (map[string]PathInfo, error) {
 	if len(storePaths) == 0 {
 		return nil, nil
@@ -94,7 +94,7 @@ func GetPathInfos(ctx context.Context, storePaths []string) (map[string]PathInfo
 	return nil, fmt.Errorf("failed to parse nix path-info output: %s", out.String())
 }
 
-// BuildTarget 执行本地 `nix build`
+// BuildTarget runs `nix build` on a flake installable.
 func BuildTarget(ctx context.Context, target string) ([]string, error) {
 	cmd := exec.CommandContext(ctx, "nix", "build", "--extra-experimental-features", "nix-command flakes", target, "-L", "--no-link", "--json")
 	var out bytes.Buffer

@@ -2,12 +2,14 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"noci/pkg/log"
 	"noci/pkg/oci"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -16,7 +18,7 @@ import (
 // metrics tracks per-route request counts for /metrics endpoint.
 type metrics struct {
 	mu        sync.Mutex
-	counts    map[string]int // key: "METHOD /path STATUS SOURCE"
+	counts    map[string]int
 	startTime time.Time
 }
 
@@ -30,7 +32,8 @@ func (m *metrics) inc(method, path, status, source string) {
 type Server struct {
 	addr           string
 	upstream       string
-	client         *oci.Client
+	client         oci.Store
+	rawClient      *oci.Client
 	upstreamProxy  *httputil.ReverseProxy
 	upstreamExtras []*httputil.ReverseProxy
 	indexMu        sync.RWMutex
@@ -43,12 +46,17 @@ type Server struct {
 	metrics        metrics
 	limiter        *rateLimiter
 	cb             *CircuitBreaker
+	cacheSvc       *CacheService
+	adminSvc       *AdminService
 }
 
 func NewServer(registry, repo, token, addr, upstream, authKey string, rateLimit float64, extraUpstreams []string) *Server {
 	if registry == "" || repo == "" || addr == "" {
 		panic("server: registry, repo, and addr must not be empty")
 	}
+
+	client := oci.NewClient(registry, repo, token)
+
 	targetURL, err := url.Parse(upstream)
 	var proxy *httputil.ReverseProxy
 	if err == nil {
@@ -87,10 +95,11 @@ func NewServer(registry, repo, token, addr, upstream, authKey string, rateLimit 
 		limiter = newRateLimiter(rateLimit, burst)
 	}
 
-	return &Server{
+	s := &Server{
 		addr:           addr,
 		upstream:       upstream,
-		client:         oci.NewClient(registry, repo, token),
+		client:         client,
+		rawClient:      client,
 		upstreamProxy:  proxy,
 		upstreamExtras: extras,
 		authKey:        authKey,
@@ -98,10 +107,94 @@ func NewServer(registry, repo, token, addr, upstream, authKey string, rateLimit 
 		limiter:        limiter,
 		cb:             NewCircuitBreaker(5, 30*time.Second),
 	}
+	s.cacheSvc = newCacheService(s)
+	s.adminSvc = newAdminService(s)
+	return s
+}
+
+// withMiddleware wraps a handler with auth, rate limiting, and logging.
+func (s *Server) withMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !s.checkAuth(r) {
+			w.Header().Set("WWW-Authenticate", `Basic realm="noci"`)
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		if s.limiter != nil {
+			ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+			if !s.limiter.allow(ip) {
+				http.Error(w, "Rate Limit Exceeded", http.StatusTooManyRequests)
+				return
+			}
+		}
+
+		lrw := &loggingResponseWriter{ResponseWriter: w, statusCode: http.StatusNotFound}
+		start := time.Now()
+		defer func() {
+			silentPaths := map[string]bool{
+				"/api/digest":  true,
+				"/app.js":      true,
+				"/style.css":   true,
+				"/favicon.svg": true,
+				"/healthz":     true,
+				"/metrics":     true,
+			}
+			status := strconv.Itoa(lrw.statusCode)
+			// Use route pattern (e.g. "/{hash}.narinfo") instead of raw path
+			// to prevent high-cardinality label explosion from unique hashes.
+			pattern := r.Pattern
+			if pattern == "" {
+				pattern = r.URL.Path
+			}
+			// Strip leading method prefix from pattern ("GET /foo" → "/foo")
+			if idx := strings.IndexByte(pattern, ' '); idx != -1 {
+				pattern = pattern[idx+1:]
+			}
+			s.metrics.inc(r.Method, pattern, status, lrw.source)
+			if silentPaths[r.URL.Path] {
+				return
+			}
+			source := ""
+			if lrw.source != "" {
+				source = fmt.Sprintf(" (%s)", lrw.source)
+			}
+			log.Info("[noci-proxy] %s %s - %d%s (%s)", r.Method, r.URL.Path, lrw.statusCode, source, time.Since(start))
+		}()
+
+		next(lrw, r)
+	}
+}
+
+func (s *Server) setupMux() *http.ServeMux {
+	mux := http.NewServeMux()
+
+	// Static assets
+	mux.HandleFunc("GET /{$}", s.withMiddleware(s.handleDashboard))
+	mux.HandleFunc("GET /app.js", s.withMiddleware(s.handleAppJS))
+	mux.HandleFunc("GET /style.css", s.withMiddleware(s.handleStyleCSS))
+	mux.HandleFunc("GET /favicon.svg", s.withMiddleware(s.handleFavicon))
+
+	// Nix Cache protocol
+	mux.HandleFunc("GET /nix-cache-info", s.withMiddleware(s.HandleNixCacheInfo))
+	mux.HandleFunc("GET /public-key", s.withMiddleware(s.handlePublicKey))
+	mux.HandleFunc("GET /nar/{filename...}", s.withMiddleware(s.handleNarRoute))
+	// Catch-all for {hash}.narinfo — Go 1.26 ServeMux rejects /{hash}.narinfo
+	// because the wildcard doesn't end the segment. Static routes above take priority.
+	mux.HandleFunc("GET /{path}", s.withMiddleware(s.handleCatchAll))
+
+	// Management API
+	mux.HandleFunc("GET /healthz", s.withMiddleware(s.handleHealthz))
+	mux.HandleFunc("GET /metrics", s.withMiddleware(s.handleMetrics))
+	mux.HandleFunc("GET /api/digest", s.withMiddleware(s.handleAPIDigest))
+	mux.HandleFunc("GET /api/index", s.withMiddleware(s.handleAPIIndex))
+	mux.HandleFunc("DELETE /api/delete/{hash}", s.withMiddleware(s.handleAPIDeleteRoute))
+
+	return mux
 }
 
 func (s *Server) Start(ctx context.Context) error {
-	warmCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	warmCtx, cancel := context.WithTimeout(ctx, oci.DefaultHTTPTimeout)
 	if exists, digest := s.client.ManifestExists(warmCtx, "noci-index"); exists {
 		s.lastDigest = digest
 	}
@@ -113,14 +206,11 @@ func (s *Server) Start(ctx context.Context) error {
 	cancel()
 
 	s.StartPreflightProbe()
-	go s.startActiveSyncLoop(ctx, 30*time.Second)
+	go s.startActiveSyncLoop(ctx, oci.DefaultActiveSyncPeriod)
 	go s.startCleanupLoop(ctx)
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/", s.HandleRoutes)
-
 	srv := &http.Server{
-		Handler: mux,
+		Handler: s.setupMux(),
 	}
 
 	listener, err := net.Listen("tcp", s.addr)
@@ -166,6 +256,43 @@ func (s *Server) indexCount() int {
 	return len(s.index.Entries)
 }
 
+func (s *Server) StartPreflightProbe() {
+	s.canDelete = true
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		s.canDelete = s.probeWriteCapability(ctx)
+	}()
+}
+
+func (s *Server) probeWriteCapability(ctx context.Context) bool {
+	resp, err := s.rawClient.RawRequest(ctx, "PUT", "/manifests/noci-probe-write", nil, "")
+	if err != nil {
+		errStr := strings.ToLower(err.Error())
+		if strings.Contains(errStr, "401") || strings.Contains(errStr, "403") ||
+			strings.Contains(errStr, "unauthorized") || strings.Contains(errStr, "forbidden") {
+			log.Warning("[noci-proxy] OCI Registry write capability: DISABLED (read-only token)")
+			return false
+		}
+	}
+	if resp != nil {
+		defer resp.Body.Close()
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			log.Warning("[noci-proxy] OCI Registry write capability: DISABLED (Status %d)", resp.StatusCode)
+			return false
+		}
+	}
+
+	go func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = s.client.DeleteManifest(cleanupCtx, "noci-probe-write")
+	}()
+
+	log.Info("[noci-proxy] OCI Registry write capability: ENABLED")
+	return true
+}
+
 func (s *Server) startActiveSyncLoop(ctx context.Context, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -187,7 +314,7 @@ func (s *Server) startActiveSyncLoop(ctx context.Context, interval time.Duration
 			if remoteDigest != "" && remoteDigest != currentDigest {
 				log.Info("Detected remote OCI index update (%s -> %s). Synchronizing...", shortDigest(currentDigest), shortDigest(remoteDigest))
 
-				syncCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+				syncCtx, cancel := context.WithTimeout(ctx, oci.DefaultHTTPTimeout)
 				if err := s.RefreshIndex(syncCtx); err != nil {
 					log.Warning("Background sync index failed: %v", err)
 				} else {
@@ -213,7 +340,6 @@ func (s *Server) startCleanupLoop(ctx context.Context) {
 			if s.limiter != nil {
 				s.limiter.cleanup()
 			}
-			// Clean up expired negCache entries (stale > 30s) to prevent unbounded memory growth
 			s.negCache.Range(func(key, value interface{}) bool {
 				if t, ok := value.(time.Time); ok && time.Since(t) > 30*time.Second {
 					s.negCache.Delete(key)

@@ -3,18 +3,18 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"noci/pkg/config"
 	"noci/pkg/log"
 	"noci/pkg/oci"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
 )
 
 var (
-	repairFlags CommonFlags
+	repairFlags  CommonFlags
 	repairDryRun bool
 )
 
@@ -24,6 +24,7 @@ var repairCmd = &cobra.Command{
 	Long: `Scan all OCI manifest tags and add any missing entries to the index.
 This repairs the index when it has fallen out of sync with the registry
 (e.g., after a failed index push or an incomplete push).`,
+	Args: cobra.NoArgs,
 	RunE: runRepair,
 }
 
@@ -57,7 +58,7 @@ func runRepair(cmd *cobra.Command, args []string) error {
 	var candidateHashes []string
 	for _, tag := range tags {
 		lower := strings.ToLower(tag)
-		if nixHashRegex.MatchString(lower) {
+		if config.IsNixHash(lower) {
 			if _, exists := index.Entries[lower]; !exists {
 				candidateHashes = append(candidateHashes, lower)
 			}
@@ -75,49 +76,24 @@ func runRepair(cmd *cobra.Command, args []string) error {
 	if repairDryRun {
 		log.Warning("DRY RUN: Would repair these entries:")
 		for _, hash := range candidateHashes {
-			fmt.Printf("  - %s\n", hash)
+			log.Info("  - %s", hash)
 		}
 		return nil
 	}
 
 	log.Action("Repairing %d entries (8 workers)...", len(candidateHashes))
 
-	type repairResult struct {
-		hash string
-		err  error
-	}
-	results := make(chan repairResult, len(candidateHashes))
-	sem := make(chan struct{}, 8)
-	var wg sync.WaitGroup
-
 	repairCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 
-	for _, hash := range candidateHashes {
-		sem <- struct{}{}
-		wg.Add(1)
-
-		go func(h string) {
-			defer func() {
-				<-sem
-				wg.Done()
-			}()
-
-			if err := client.RepairIndexEntry(repairCtx, h, index); err != nil {
-				results <- repairResult{hash: h, err: err}
-			} else {
-				results <- repairResult{hash: h}
-			}
-		}(hash)
-	}
-
-	wg.Wait()
-	close(results)
+	errs := runConcurrent(repairCtx, candidateHashes, 8, func(ctx context.Context, hash string) error {
+		return client.RepairIndexEntry(ctx, hash, index)
+	})
 
 	var repaired, failed int
-	for r := range results {
-		if r.err != nil {
-			log.Warning("Failed to repair %s: %v", r.hash, r.err)
+	for i, err := range errs {
+		if err != nil {
+			log.Warning("Failed to repair %s: %v", candidateHashes[i], err)
 			failed++
 		} else {
 			repaired++
