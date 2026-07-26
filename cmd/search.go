@@ -16,7 +16,11 @@ var searchFlags CommonFlags
 var searchCmd = &cobra.Command{
 	Use:   "search [query]",
 	Short: "Search or list packages cached in the OCI registry",
-	RunE:  runSearch,
+	Long: `List all cached packages or filter by name/hash substring. When a query
+is provided, it is first tried as a Nix hash or store path, then falls back
+to substring matching against package names and hashes.`,
+	Args: cobra.ArbitraryArgs,
+	RunE: runSearch,
 }
 
 func init() {
@@ -33,7 +37,7 @@ func runSearch(cmd *cobra.Command, args []string) error {
 	client := oci.NewClient(cfg.Registry, cfg.Repo, cfg.Token)
 	index, err := client.FetchIndex(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to fetch index: %w", err)
+		return fmt.Errorf("fetch index: %w", err)
 	}
 
 	type match struct {

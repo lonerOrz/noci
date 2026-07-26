@@ -47,7 +47,6 @@ func init() {
 	RootCmd.AddCommand(pinCmd)
 	RootCmd.AddCommand(unpinCmd)
 	RootCmd.AddCommand(indexCmd)
-	RootCmd.AddCommand(repairCmd)
 	RootCmd.AddCommand(&cobra.Command{
 		Use:       "completion [bash|zsh|fish|powershell]",
 		Short:     "Generate shell completion scripts",

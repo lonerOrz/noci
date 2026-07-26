@@ -23,7 +23,15 @@ var (
 var gcCmd = &cobra.Command{
 	Use:   "gc [paths, targets, or 32-char hashes...]",
 	Short: "Garbage collect orphaned, quota-exceeded, or targeted packages",
-	RunE:  runGC,
+	Long: `Remove cached packages from the OCI registry. Without arguments, performs
+quota-based eviction using --max-size and --grace-period. With arguments,
+explicitly targets specific hashes for removal.
+
+Use --physical-sweep to physically delete evicted manifest tags from the
+registry (required on GHCR which uses tag-overwriting). --keep-versions
+retains N recent versions per package name.`,
+	Args: cobra.ArbitraryArgs,
+	RunE: runGC,
 }
 
 func init() {
@@ -45,12 +53,12 @@ func runGC(cmd *cobra.Command, args []string) error {
 
 	maxBytes, err := config.ParseSize(gcMaxSize)
 	if err != nil {
-		return fmt.Errorf("failed to parse max-size: %w", err)
+		return fmt.Errorf("parse max-size: %w", err)
 	}
 
 	dur, err := time.ParseDuration(gcGracePeriod)
 	if err != nil {
-		return fmt.Errorf("failed to parse grace-period: %w", err)
+		return fmt.Errorf("parse grace-period: %w", err)
 	}
 
 	inputHashes, err := config.ResolveHashes(ctx, args, false)

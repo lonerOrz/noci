@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"fmt"
 	"io"
-	"noci/pkg/config"
 	"noci/pkg/log"
 	"noci/pkg/nix"
 	"noci/pkg/oci"
@@ -29,7 +28,17 @@ var (
 var pushCmd = &cobra.Command{
 	Use:   "push [paths or targets...]",
 	Short: "Build local paths or targets and push to OCI registry",
-	RunE:  runPush,
+	Long: `Push one or more Nix store paths, flake targets, or derivation outputs
+to an OCI registry. Paths can be provided as arguments or via stdin.
+
+When a target is not a store path, it is built via 'nix build --no-link --json'
+before pushing. Stdin accepts JSON array, newline-delimited paths, or pipe from
+'--json' output.
+
+Signing is required for cache integrity. Provide a key via NOCI_SIGNING_KEY env
+var or --key-file flag.`,
+	Args: cobra.ArbitraryArgs,
+	RunE: runPush,
 }
 
 func init() {
@@ -46,11 +55,8 @@ func init() {
 func runPush(cmd *cobra.Command, args []string) error {
 	ctx := cmd.Context()
 
-	cfg, err := config.Load(config.Options{
-		Registry:        pushFlags.Registry,
-		Repo:            pushFlags.Repo,
-		ExtraRegistries: pushRegistries,
-	})
+	pushFlags.ExtraRegistries = pushRegistries
+	cfg, err := pushFlags.ResolveConfig()
 	if err != nil {
 		return err
 	}
@@ -72,13 +78,13 @@ func runPush(cmd *cobra.Command, args []string) error {
 		var err error
 		signer, err = nix.NewSignerFromKey(signingKey)
 		if err != nil {
-			return fmt.Errorf("failed to load signing key from NOCI_SIGNING_KEY: %w", err)
+			return fmt.Errorf("load signing key from env: %w", err)
 		}
 	} else {
 		var err error
 		signer, err = nix.NewSigner(keyFile)
 		if err != nil {
-			return fmt.Errorf("failed to load signing key from file: %w", err)
+			return fmt.Errorf("load signing key from file: %w", err)
 		}
 	}
 
@@ -93,7 +99,7 @@ func runPush(cmd *cobra.Command, args []string) error {
 			log.Action("Target %q does not look like a store path. Running `nix build %s --no-link --json`...", arg, arg)
 			buildPaths, err := nix.BuildTarget(ctx, arg)
 			if err != nil {
-				return fmt.Errorf("failed to build target %q: %w", arg, err)
+				return fmt.Errorf("build target %q: %w", arg, err)
 			}
 			inputPaths = append(inputPaths, buildPaths...)
 		} else {

@@ -23,6 +23,7 @@ var indexCleanCmd = &cobra.Command{
 	Long: `Scan every entry in the index, fetch its manifest, and remove entries
 where the manifest is missing, has no layers, or has no annotations.
 Optionally delete the corrupted manifest tags from the registry.`,
+	Args: cobra.NoArgs,
 	RunE: runIndexClean,
 }
 

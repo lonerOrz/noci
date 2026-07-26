@@ -17,7 +17,13 @@ var (
 var pinCmd = &cobra.Command{
 	Use:   "pin [paths, targets, or 32-char hashes...]",
 	Short: "Pin specific packages/targets in the OCI cache to protect them from GC",
-	RunE:  runPin,
+	Long: `Mark one or more packages as pinned roots in the index. Pinned packages
+are excluded from garbage collection until their TTL expires.
+
+Accepts store paths, flake targets, or 32-char Nix hashes. Store paths and
+targets are resolved to hashes before pinning.`,
+	Args: cobra.MinimumNArgs(1),
+	RunE: runPin,
 }
 
 func init() {
@@ -26,10 +32,6 @@ func init() {
 }
 
 func runPin(cmd *cobra.Command, args []string) error {
-	if len(args) == 0 {
-		return fmt.Errorf("no paths, targets, or hashes specified to pin")
-	}
-
 	ctx := cmd.Context()
 
 	cfg, err := pinFlags.Resolve()
@@ -51,7 +53,7 @@ func runPin(cmd *cobra.Command, args []string) error {
 	client := oci.NewClient(cfg.Registry, cfg.Repo, cfg.Token)
 	index, err := client.FetchIndex(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to fetch index: %w", err)
+		return fmt.Errorf("fetch index: %w", err)
 	}
 
 	for _, hash := range inputHashes {
@@ -64,7 +66,7 @@ func runPin(cmd *cobra.Command, args []string) error {
 
 	log.Action("Saving updated index back to OCI...")
 	if err := client.PushIndex(ctx, index); err != nil {
-		return fmt.Errorf("failed to push index: %w", err)
+		return fmt.Errorf("push index: %w", err)
 	}
 
 	return nil

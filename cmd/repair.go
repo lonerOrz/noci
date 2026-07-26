@@ -25,6 +25,7 @@ var repairCmd = &cobra.Command{
 	Long: `Scan all OCI manifest tags and add any missing entries to the index.
 This repairs the index when it has fallen out of sync with the registry
 (e.g., after a failed index push or an incomplete push).`,
+	Args: cobra.NoArgs,
 	RunE: runRepair,
 }
 
