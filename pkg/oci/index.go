@@ -2,6 +2,7 @@ package oci
 
 import (
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -16,6 +17,7 @@ type CacheIndex struct {
 	Roots     map[string]GCRoot    `json:"roots,omitempty"`
 	Entries   map[string]IndexItem `json:"entries"`
 	Source    string               `json:"source,omitempty"`
+	mu        sync.Mutex           `json:"-"`
 }
 
 type GCRoot struct {
@@ -91,6 +93,8 @@ func (idx *CacheIndex) Upgrade() {
 }
 
 func (idx *CacheIndex) AddEntry(hash, name, narinfo, digest string, size int64, refs []string) {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
 	now := time.Now()
 	// Strip "sha256:" prefix so NarDigest stores bare hex.
 	hex := strings.TrimPrefix(digest, "sha256:")
@@ -108,6 +112,8 @@ func (idx *CacheIndex) AddEntry(hash, name, narinfo, digest string, size int64, 
 }
 
 func (idx *CacheIndex) PinRoot(hash string, ttlSeconds int64) {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
 	if idx.Roots == nil {
 		idx.Roots = make(map[string]GCRoot)
 	}
