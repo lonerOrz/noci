@@ -1,46 +1,48 @@
 name: "Storage GC"
+
 on:
   schedule:
     - cron: "0 0 * * 0"
   workflow_dispatch:
     inputs:
       target-repositories:
-        description: 'JSON array of repositories to GC, e.g. ["owner/repo1","owner/repo2"]'
+        description: "JSON array of repositories to GC"
         required: false
         default: '["lonerOrz/noci", "lonerOrz/cachyos-loner"]'
         type: string
 
 jobs:
-  gc-and-vacuum:
+  gc:
     runs-on: ubuntu-latest
     permissions:
+      contents: read
       packages: write
     strategy:
       fail-fast: false
       matrix:
         target-repository: ${{ fromJSON(github.event.inputs.target-repositories || '["lonerOrz/noci", "lonerOrz/cachyos-loner"]') }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Install Nix
-        uses: cachix/install-nix-action@v30
-
-      - name: Execute Logical GC
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v30
+      - name: Logical GC + Physical Sweep
         run: |
-          nix run .#noci -- gc --max-size 15GB --grace-period 360h --physical-sweep --dry-run=false
+          nix run .#noci -- gc \
+            --max-size 15GB \
+            --grace-period 360h \
+            --physical-sweep \
+            --dry-run=false
         env:
           NOCI_REGISTRY: "ghcr.io"
           NOCI_REPO: ${{ matrix.target-repository }}
           NOCI_TOKEN: ${{ secrets.GH_TOKEN }}
-
-      - name: Purge untagged packages for ${{ matrix.target-repository }}
+      - name: Purge untagged packages
+        if: success()
         uses: Chizkiyahu/delete-untagged-ghcr-action@v6
         with:
           token: ${{ secrets.GH_TOKEN }}
           repository_owner: ${{ github.repository_owner }}
           repository: ${{ matrix.target-repository }}
-          package_name: "nix-cache" # noci 统一
+          package_name: "nix-cache"
           owner_type: ${{ github.event.repository.owner.type == 'Organization' && 'org' || 'user' }}
           untagged_only: true
           except_untagged_multiplatform: false
