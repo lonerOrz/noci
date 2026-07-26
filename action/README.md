@@ -19,18 +19,18 @@ Zero-config Nix binary cache over OCI for GitHub Actions.
 
 ## Inputs
 
-| Input | Description | Default |
-|:------|:------------|:--------|
-| `signing-key` | Nix signing key (`key_name:base64`). Omit = fetch-only | _(none)_ |
-| `registry` | OCI registry endpoint | `ghcr.io` |
-| `repo` | OCI repository (`owner/repo`) | `GITHUB_REPOSITORY` |
-| `token` | Registry auth token | `GITHUB_TOKEN` |
-| `compression` | `zstd` or `gzip` | `zstd` |
-| `compression-level` | 1-19 for zstd | `3` |
-| `jobs` | Compression threads (`0` = auto) | `0` |
-| `skip-upstream` | Skip paths with upstream signatures | `true` |
-| `fail-on-error` | Push failures = warning, not CI failure | `false` |
-| `proxy-port` | Local proxy port (`0` = random) | `0` |
+| Input               | Description                                            | Default             |
+| :------------------ | :----------------------------------------------------- | :------------------ |
+| `signing-key`       | Nix signing key (`key_name:base64`). Omit = fetch-only | _(none)_            |
+| `registry`          | OCI registry endpoint                                  | `ghcr.io`           |
+| `repo`              | OCI repository (`owner/repo`)                          | `GITHUB_REPOSITORY` |
+| `token`             | Registry auth token                                    | `GITHUB_TOKEN`      |
+| `compression`       | `zstd` or `gzip`                                       | `zstd`              |
+| `compression-level` | 1-19 for zstd                                          | `3`                 |
+| `jobs`              | Compression threads (`0` = auto)                       | `0`                 |
+| `skip-upstream`     | Skip paths with upstream signatures                    | `true`              |
+| `fail-on-error`     | Push failures = warning, not CI failure                | `false`             |
+| `proxy-port`        | Local proxy port (`0` = random)                        | `0`                 |
 
 ## Outputs
 

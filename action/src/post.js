@@ -36,9 +36,7 @@ async function run() {
     await push(registry, repo, signingKey, token, pushArgs, paths);
 
     utils.exportOutput("pushed-count", paths.length.toString());
-    console.log(
-      `[noci-action] Successfully pushed ${paths.length} packages.`,
-    );
+    console.log(`[noci-action] Successfully pushed ${paths.length} packages.`);
   } catch (error) {
     const failOnError = utils.getState("fail-on-error") === "true";
     if (failOnError) {
@@ -120,7 +118,10 @@ function push(registry, repo, signingKey, token, pushArgs, paths) {
 function cleanup(proxyPid) {
   for (const key of ["hook-log-path", "hook-script-path"]) {
     const f = utils.getState(key);
-    if (f) try { fs.unlinkSync(f); } catch {}
+    if (f)
+      try {
+        fs.unlinkSync(f);
+      } catch {}
   }
   kill(proxyPid);
 }

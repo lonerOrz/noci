@@ -11,15 +11,13 @@ function loadConfig() {
     "";
   const signingKey =
     utils.getEnvOrInput("NOCI_SIGNING_KEY", "signing-key") || "";
-  const proxyPort =
-    utils.getEnvOrInput("NOCI_PROXY_PORT", "proxy-port") || "0";
+  const proxyPort = utils.getEnvOrInput("NOCI_PROXY_PORT", "proxy-port") || "0";
 
   const compression =
     utils.getEnvOrInput("NOCI_COMPRESSION", "compression") || "zstd";
   const compressionLevel =
     utils.getEnvOrInput("NOCI_COMPRESSION_LEVEL", "compression-level") || "3";
-  const jobs =
-    utils.getEnvOrInput("NOCI_JOBS", "jobs") || "0";
+  const jobs = utils.getEnvOrInput("NOCI_JOBS", "jobs") || "0";
   const skipUpstream =
     utils.getEnvOrInput("NOCI_SKIP_UPSTREAM", "skip-upstream") || "true";
   const failOnError =

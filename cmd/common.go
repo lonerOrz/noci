@@ -8,8 +8,8 @@ import (
 
 // CommonFlags holds shared CLI flags for OCI registry configuration.
 type CommonFlags struct {
-	Repo           string
-	Registry       string
+	Repo            string
+	Registry        string
 	ExtraRegistries []string
 }
 

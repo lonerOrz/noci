@@ -95,9 +95,9 @@ func runSearch(cmd *cobra.Command, args []string) error {
 
 	if jsonOutput {
 		type jsonEntry struct {
-			Hash string `json:"hash"`
-			Name string `json:"name"`
-			Size int64  `json:"size"`
+			Hash  string `json:"hash"`
+			Name  string `json:"name"`
+			Size  int64  `json:"size"`
 			Added string `json:"added"`
 		}
 		out := make([]jsonEntry, len(matched))

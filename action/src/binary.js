@@ -52,7 +52,9 @@ async function downloadRelease() {
     await download(`${base}/latest/download/${name}`, BINARY_PATH);
     return BINARY_PATH;
   } catch {
-    console.log("[noci-action] Release download failed, building from source...");
+    console.log(
+      "[noci-action] Release download failed, building from source...",
+    );
     return null;
   }
 }

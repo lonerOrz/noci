@@ -3,8 +3,7 @@ const fs = require("fs");
 const http = require("http");
 const utils = require("./utils");
 
-const PORT_PATTERN =
-  /Proxy running on http:\/\/\[?[a-zA-Z0-9.:-]+\]?:([0-9]+)/;
+const PORT_PATTERN = /Proxy running on http:\/\/\[?[a-zA-Z0-9.:-]+\]?:([0-9]+)/;
 
 async function startProxy(binPath, proxyPort) {
   const runId = process.env.GITHUB_RUN_ID || "default";
@@ -88,9 +87,7 @@ function fetchPublicKey(url) {
       .get(`${url}/public-key`, (res) => {
         let data = "";
         res.on("data", (c) => (data += c));
-        res.on("end", () =>
-          resolve(res.statusCode === 200 ? data.trim() : ""),
-        );
+        res.on("end", () => resolve(res.statusCode === 200 ? data.trim() : ""));
       })
       .on("error", () => resolve(""));
   });

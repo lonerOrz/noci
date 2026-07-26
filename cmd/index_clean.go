@@ -12,8 +12,8 @@ import (
 )
 
 var (
-	cleanFlags     CommonFlags
-	cleanDryRun    bool
+	cleanFlags      CommonFlags
+	cleanDryRun     bool
 	cleanDeleteOrph bool
 )
 
