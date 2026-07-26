@@ -9,4 +9,5 @@ var indexCmd = &cobra.Command{
 
 func init() {
 	indexCmd.AddCommand(repairCmd)
+	indexCmd.AddCommand(indexCleanCmd)
 }
