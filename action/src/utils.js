@@ -29,6 +29,7 @@ module.exports = {
   },
 
   exportVariable(key, value) {
+    process.env[key] = value;
     writeLine(process.env.GITHUB_ENV, key, value);
   },
 
