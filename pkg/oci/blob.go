@@ -58,10 +58,38 @@ func (bs *blobService) UploadBlob(ctx context.Context, filePath, sha256Hex, desc
 		headResp.Body.Close()
 	}
 
-	if size > chunkedThreshold {
-		return bs.uploadBlobChunked(ctx, filePath, sha256Hex, description, notifier)
+	// Retry the entire upload on session expiration (GHCR returns 404 "blob upload invalid"
+	// when the upload session expires during long chunked uploads).
+	const maxUploadRetries = 2
+	for attempt := 0; attempt <= maxUploadRetries; attempt++ {
+		if attempt > 0 {
+			log.Warning("[noci] Upload session expired for %s, retrying (attempt %d)...", description, attempt+1)
+			time.Sleep(time.Duration(attempt) * 10 * time.Second)
+			notifier = &NoopProgressNotifier{} // reset notifier for retry
+		}
+
+		if size > chunkedThreshold {
+			digest, size, err = bs.uploadBlobChunked(ctx, filePath, sha256Hex, description, notifier)
+		} else {
+			digest, size, err = bs.uploadBlobMonolithic(ctx, filePath, sha256Hex, description, notifier)
+		}
+
+		if err == nil {
+			return digest, size, nil
+		}
+
+		if !isUploadSessionExpired(err) {
+			return digest, size, err
+		}
 	}
-	return bs.uploadBlobMonolithic(ctx, filePath, sha256Hex, description, notifier)
+	return digest, size, fmt.Errorf("upload failed after %d retries: %w", maxUploadRetries, err)
+}
+
+func isUploadSessionExpired(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "blob upload invalid") ||
+		strings.Contains(msg, "BLOB_UPLOAD_INVALID") ||
+		strings.Contains(msg, "HTTP 404")
 }
 
 const chunkedThreshold = 64 * 1024 * 1024 // 64MB
