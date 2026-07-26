@@ -6,9 +6,8 @@ on:
   workflow_dispatch:
     inputs:
       target-repositories:
-        description: "JSON array of repositories to GC"
-        required: false
-        default: '["lonerOrz/noci", "lonerOrz/cachyos-loner"]'
+        description: 'JSON array, e.g. ["lonerOrz/noci"]'
+        required: true
         type: string
 
 jobs:
@@ -20,7 +19,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target-repository: ${{ fromJSON(github.event.inputs.target-repositories || '["lonerOrz/noci", "lonerOrz/cachyos-loner"]') }}
+        target-repository: ${{ fromJSON(github.event.inputs.target-repositories || '["lonerOrz/noci"]') }}
     steps:
       - uses: actions/checkout@v4
       - uses: cachix/install-nix-action@v30
