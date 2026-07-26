@@ -8,7 +8,6 @@ import (
 	"noci/pkg/oci"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -84,42 +83,17 @@ func runRepair(cmd *cobra.Command, args []string) error {
 
 	log.Action("Repairing %d entries (8 workers)...", len(candidateHashes))
 
-	type repairResult struct {
-		hash string
-		err  error
-	}
-	results := make(chan repairResult, len(candidateHashes))
-	sem := make(chan struct{}, 8)
-	var wg sync.WaitGroup
-
 	repairCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 
-	for _, hash := range candidateHashes {
-		sem <- struct{}{}
-		wg.Add(1)
-
-		go func(h string) {
-			defer func() {
-				<-sem
-				wg.Done()
-			}()
-
-			if err := client.RepairIndexEntry(repairCtx, h, index); err != nil {
-				results <- repairResult{hash: h, err: err}
-			} else {
-				results <- repairResult{hash: h}
-			}
-		}(hash)
-	}
-
-	wg.Wait()
-	close(results)
+	errs := runConcurrent(repairCtx, candidateHashes, 8, func(ctx context.Context, hash string) error {
+		return client.RepairIndexEntry(ctx, hash, index)
+	})
 
 	var repaired, failed int
-	for r := range results {
-		if r.err != nil {
-			log.Warning("Failed to repair %s: %v", r.hash, r.err)
+	for i, err := range errs {
+		if err != nil {
+			log.Warning("Failed to repair %s: %v", candidateHashes[i], err)
 			failed++
 		} else {
 			repaired++

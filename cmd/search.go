@@ -1,10 +1,12 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
 	"noci/pkg/config"
 	"noci/pkg/log"
 	"noci/pkg/oci"
+	"os"
 	"sort"
 	"strings"
 
@@ -90,6 +92,27 @@ func runSearch(cmd *cobra.Command, args []string) error {
 	sort.Slice(matched, func(i, j int) bool {
 		return matched[i].item.Name < matched[j].item.Name
 	})
+
+	if jsonOutput {
+		type jsonEntry struct {
+			Hash string `json:"hash"`
+			Name string `json:"name"`
+			Size int64  `json:"size"`
+			Added string `json:"added"`
+		}
+		out := make([]jsonEntry, len(matched))
+		for i, m := range matched {
+			out[i] = jsonEntry{
+				Hash:  m.hash,
+				Name:  m.item.Name,
+				Size:  m.item.NarSize,
+				Added: m.item.Added.Local().Format("2006-01-02T15:04:05Z07:00"),
+			}
+		}
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(out)
+	}
 
 	if query != "" {
 		log.Success("Found %d matching packages:", len(matched))

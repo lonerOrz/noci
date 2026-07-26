@@ -56,57 +56,44 @@ func runIndexClean(cmd *cobra.Command, args []string) error {
 
 	log.Action("Scanning %d index entries for corrupted manifests...", len(index.Entries))
 
-	type checkResult struct {
-		hash   string
-		reason string
-		keep   bool
-		err    error
+	hashes := make([]string, 0, len(index.Entries))
+	for h := range index.Entries {
+		hashes = append(hashes, h)
 	}
-	results := make(chan checkResult, len(index.Entries))
-	sem := make(chan struct{}, 8)
-	var wg sync.WaitGroup
 
 	checkCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 
-	for hash := range index.Entries {
-		sem <- struct{}{}
-		wg.Add(1)
-		go func(h string) {
-			defer func() {
-				<-sem
-				wg.Done()
-			}()
-
-			manifest, err := client.FetchManifest(checkCtx, h)
-			if err != nil {
-				results <- checkResult{hash: h, reason: fmt.Sprintf("fetch failed: %v", err)}
-				return
-			}
-
-			if len(manifest.Layers) == 0 {
-				results <- checkResult{hash: h, reason: "no layers"}
-				return
-			}
-
-			if manifest.Annotations == nil || manifest.Annotations["org.nix.name"] == "" {
-				results <- checkResult{hash: h, reason: "no nix annotations"}
-				return
-			}
-
-			results <- checkResult{hash: h, keep: true}
-		}(hash)
-	}
-
-	wg.Wait()
-	close(results)
-
+	var mu sync.Mutex
 	var corrupted []cleanResult
-	for r := range results {
-		if !r.keep {
-			corrupted = append(corrupted, cleanResult{hash: r.hash, reason: r.reason})
+
+	errs := runConcurrent(checkCtx, hashes, 8, func(ctx context.Context, h string) error {
+		manifest, err := client.FetchManifest(ctx, h)
+		if err != nil {
+			mu.Lock()
+			corrupted = append(corrupted, cleanResult{hash: h, reason: fmt.Sprintf("fetch failed: %v", err)})
+			mu.Unlock()
+			return nil // not a fatal error
 		}
-	}
+
+		if len(manifest.Layers) == 0 {
+			mu.Lock()
+			corrupted = append(corrupted, cleanResult{hash: h, reason: "no layers"})
+			mu.Unlock()
+			return nil
+		}
+
+		if manifest.Annotations == nil || manifest.Annotations["org.nix.name"] == "" {
+			mu.Lock()
+			corrupted = append(corrupted, cleanResult{hash: h, reason: "no nix annotations"})
+			mu.Unlock()
+			return nil
+		}
+
+		return nil
+	})
+
+	_ = errs // all errors are handled inline via reason tracking
 
 	if len(corrupted) == 0 {
 		log.Success("Index is clean. No corrupted entries found.")

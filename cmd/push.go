@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io"
 	"noci/pkg/log"
@@ -61,75 +62,14 @@ func runPush(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	var signer *nix.Signer
-	signingKey := os.Getenv("NOCI_SIGNING_KEY")
-	keyFile := pushKeyFile
-	if keyFile == "" {
-		keyFile = os.Getenv("NOCI_KEY_FILE")
+	signer, err := resolveSigner()
+	if err != nil {
+		return err
 	}
 
-	if signingKey == "" && keyFile == "" {
-		return fmt.Errorf("signing key is required to guarantee cache integrity. " +
-			"Please specify your private key via the NOCI_SIGNING_KEY environment variable " +
-			"or the --key-file flag")
-	}
-
-	if signingKey != "" {
-		var err error
-		signer, err = nix.NewSignerFromKey(signingKey)
-		if err != nil {
-			return fmt.Errorf("load signing key from env: %w", err)
-		}
-	} else {
-		var err error
-		signer, err = nix.NewSigner(keyFile)
-		if err != nil {
-			return fmt.Errorf("load signing key from file: %w", err)
-		}
-	}
-
-	var inputPaths []string
-	for _, arg := range args {
-		arg = strings.TrimSpace(arg)
-		if arg == "" {
-			continue
-		}
-
-		if !strings.HasPrefix(arg, "/nix/store") {
-			log.Action("Target %q does not look like a store path. Running `nix build %s --no-link --json`...", arg, arg)
-			buildPaths, err := nix.BuildTarget(ctx, arg)
-			if err != nil {
-				return fmt.Errorf("build target %q: %w", arg, err)
-			}
-			inputPaths = append(inputPaths, buildPaths...)
-		} else {
-			inputPaths = append(inputPaths, arg)
-		}
-	}
-
-	if len(inputPaths) == 0 {
-		stdinBytes, err := io.ReadAll(os.Stdin)
-		if err == nil && len(stdinBytes) > 0 {
-			trimmed := strings.TrimSpace(string(stdinBytes))
-			if strings.HasPrefix(trimmed, "[") || strings.HasPrefix(trimmed, "{") {
-				paths, err := nix.ParseJSONBuildOutputs([]byte(trimmed))
-				if err == nil {
-					inputPaths = append(inputPaths, paths...)
-				}
-			} else {
-				scanner := bufio.NewScanner(strings.NewReader(trimmed))
-				for scanner.Scan() {
-					line := strings.TrimSpace(scanner.Text())
-					if line != "" {
-						inputPaths = append(inputPaths, line)
-					}
-				}
-			}
-		}
-	}
-
-	if len(inputPaths) == 0 {
-		return fmt.Errorf("no paths or targets provided via arguments or stdin")
+	inputPaths, err := resolveInputs(ctx, args)
+	if err != nil {
+		return err
 	}
 
 	comp := strings.ToLower(strings.TrimSpace(pushCompression))
@@ -147,4 +87,84 @@ func runPush(cmd *cobra.Command, args []string) error {
 	pub := publisher.NewPublisher(clients, signer, pushSkipUpstream, comp, pushCompressionLevel, pushJobs)
 	pub.Profile = pushProfile
 	return pub.Publish(ctx, inputPaths)
+}
+
+// resolveSigner loads the signing key from env or file.
+func resolveSigner() (*nix.Signer, error) {
+	signingKey := os.Getenv("NOCI_SIGNING_KEY")
+	keyFile := pushKeyFile
+	if keyFile == "" {
+		keyFile = os.Getenv("NOCI_KEY_FILE")
+	}
+
+	if signingKey == "" && keyFile == "" {
+		return nil, fmt.Errorf("signing key is required to guarantee cache integrity. " +
+			"Please specify your private key via the NOCI_SIGNING_KEY environment variable " +
+			"or the --key-file flag")
+	}
+
+	if signingKey != "" {
+		return nix.NewSignerFromKey(signingKey)
+	}
+	return nix.NewSigner(keyFile)
+}
+
+// resolveInputs resolves CLI args and stdin into store paths.
+func resolveInputs(ctx context.Context, args []string) ([]string, error) {
+	var inputPaths []string
+
+	for _, arg := range args {
+		arg = strings.TrimSpace(arg)
+		if arg == "" {
+			continue
+		}
+
+		if !strings.HasPrefix(arg, "/nix/store") {
+			log.Action("Target %q does not look like a store path. Running `nix build %s --no-link --json`...", arg, arg)
+			buildPaths, err := nix.BuildTarget(ctx, arg)
+			if err != nil {
+				return nil, fmt.Errorf("build target %q: %w", arg, err)
+			}
+			inputPaths = append(inputPaths, buildPaths...)
+		} else {
+			inputPaths = append(inputPaths, arg)
+		}
+	}
+
+	if len(inputPaths) == 0 {
+		inputPaths = readStdinPaths()
+	}
+
+	if len(inputPaths) == 0 {
+		return nil, fmt.Errorf("no paths or targets provided via arguments or stdin")
+	}
+
+	return inputPaths, nil
+}
+
+// readStdinPaths reads store paths from stdin (JSON array or newline-delimited).
+func readStdinPaths() []string {
+	stdinBytes, err := io.ReadAll(os.Stdin)
+	if err != nil || len(stdinBytes) == 0 {
+		return nil
+	}
+
+	trimmed := strings.TrimSpace(string(stdinBytes))
+	if strings.HasPrefix(trimmed, "[") || strings.HasPrefix(trimmed, "{") {
+		paths, err := nix.ParseJSONBuildOutputs([]byte(trimmed))
+		if err != nil {
+			return nil
+		}
+		return paths
+	}
+
+	var paths []string
+	scanner := bufio.NewScanner(strings.NewReader(trimmed))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line != "" {
+			paths = append(paths, line)
+		}
+	}
+	return paths
 }
