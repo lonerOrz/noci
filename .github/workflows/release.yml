@@ -39,8 +39,7 @@ jobs:
 
   build:
     needs: [test, create-tag]
-    # Skip if create-tag was skipped (tag push trigger)
-    if: always() && (needs.create-tag.result == 'success' || needs.create-tag.result == 'skipped')
+    if: always() && !failure() && !cancelled()
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -89,23 +88,18 @@ jobs:
           git push -f origin v1
 
   rollback:
-    if: failure() && needs.release.result == 'success'
+    if: failure()
     needs: [build, release, update-action]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: gh release delete "$VERSION" --cleanup-tag --yes || true
+      - name: Clean up release
+        if: needs.release.result == 'success'
+        run: gh release delete "$VERSION" --cleanup-tag --yes || true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  rollback-tag:
-    if: failure() && needs.release.result != 'success' && github.event_name == 'workflow_dispatch'
-    needs: [build, release]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: |
-          gh release delete "$VERSION" --cleanup-tag --yes || true
-          git push origin --delete "$VERSION" || true
+      - name: Clean up tag
+        if: needs.release.result != 'success' && github.event_name == 'workflow_dispatch'
+        run: git push origin --delete "$VERSION" || true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -19,11 +19,9 @@ jobs:
       - id: parse
         run: |
           input="${{ github.event.inputs.repositories }}"
-          if [ -z "$input" ]; then
-            input="lonerOrz/noci"
-          fi
-          json=$(echo "$input" | jq -R -s -c 'split(" ") | map(select(length > 0))')
-          echo "repos=$json" >> "$GITHUB_OUTPUT"
+          [ -z "$input" ] && input="lonerOrz/noci"
+          repos=$(printf '%s' "$input" | jq -R -s -c 'split(" ") | map(select(length > 0))')
+          echo "repos=$repos" >> "$GITHUB_OUTPUT"
 
   gc:
     needs: parse
