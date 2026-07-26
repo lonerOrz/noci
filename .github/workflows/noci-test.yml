@@ -23,6 +23,9 @@ jobs:
         with:
           go-version: "1.x"
 
+      - name: Build noci binary
+        run: go build -o ./action/noci .
+
       - name: Install Nix
         uses: cachix/install-nix-action@v30
 
