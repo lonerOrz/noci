@@ -9,10 +9,10 @@ Zero-config Nix binary cache over OCI for GitHub Actions.
 
 ```yaml
 # Fetch-only — just add this line
-- uses: lonerOrz/noci@v1/action
+- uses: lonerOrz/noci/action@v1
 
 # Push + fetch — add one input
-- uses: lonerOrz/noci@v1/action
+- uses: lonerOrz/noci/action@v1
   with:
     signing-key: ${{ secrets.NOCI_SIGNING_KEY }}
 ```

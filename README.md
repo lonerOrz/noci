@@ -60,7 +60,7 @@ permissions: { packages: write }
 steps:
   - uses: actions/checkout@v4
   - uses: cachix/install-nix-action@v30
-  - uses: lonerOrz/noci@v1/action
+  - uses: lonerOrz/noci/action@v1
     with:
       signing-key: ${{ secrets.NOCI_SIGNING_KEY }}
   - run: nix build .#package

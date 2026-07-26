@@ -13,7 +13,7 @@ jobs:
         uses: cachix/install-nix-action@v30
 
       - name: Setup noci binary cache (from @v1 tag)
-        uses: lonerOrz/noci@v1
+        uses: lonerOrz/noci/action@v1
         with:
           repo: ${{ secrets.NOCI_REPO || github.repository }}
           signing-key: ${{ secrets.NOCI_SIGNING_KEY }}
