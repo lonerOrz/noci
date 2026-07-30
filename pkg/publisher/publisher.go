@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"fmt"
+	"noci/pkg/domain/types"
 	"noci/pkg/log"
 	"noci/pkg/nix"
 	"noci/pkg/oci"
@@ -128,10 +129,10 @@ func NewPublisher(clients []*oci.Client, signer *nix.Signer, skipUpstream bool, 
 }
 
 type uploadResult struct {
-	hash    string
+	hash    types.NixHash
 	name    string
 	narinfo string
-	digest  string
+	digest  types.OciDigest
 	size    int64
 	refs    []string
 }
@@ -464,7 +465,7 @@ func (p *Publisher) stageUploadConcurrently(ctx context.Context, store oci.Store
 				Layers: []oci.Descriptor{
 					{
 						MediaType: layerMediaType,
-						Digest:    res.digest,
+						Digest:    res.digest.String(),
 						Size:      res.size,
 					},
 				},
@@ -474,10 +475,10 @@ func (p *Publisher) stageUploadConcurrently(ctx context.Context, store oci.Store
 					"org.nix.references": strings.Join(res.refs, ","),
 				},
 			}
-			if err := store.PushManifest(pipelineCtx, res.hash, &manifest); err != nil {
+			if err := store.PushManifest(pipelineCtx, res.hash.String(), &manifest); err != nil {
 				errMu.Lock()
 				if firstErr == nil {
-					firstErr = fmt.Errorf("push manifest %s failed: %w", res.hash, err)
+					firstErr = fmt.Errorf("push manifest %s failed: %w", res.hash.String(), err)
 					cancel()
 				}
 				errMu.Unlock()
@@ -588,11 +589,14 @@ func (p *Publisher) publishSingle(ctx context.Context, store oci.Store, info nix
 	narinfoContent := nix.GenerateNarInfo(info.Path, normalizedNarHash, info.NarSize, fileHash, uploadSize, info.References, sigs, p.comp)
 	hash := nix.GetPathHash(info.Path)
 
+	h, _ := types.ParseNixHash(hash)
+	d, _ := types.ParseOciDigest(digest)
+
 	return uploadResult{
-		hash:    hash,
+		hash:    h,
 		name:    nix.GetPathName(info.Path),
 		narinfo: narinfoContent,
-		digest:  digest,
+		digest:  d,
 		size:    uploadSize,
 		refs:    info.References,
 	}, nil

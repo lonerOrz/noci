@@ -1,6 +1,7 @@
 package oci
 
 import (
+	"noci/pkg/domain/types"
 	"testing"
 	"time"
 )
@@ -114,11 +115,13 @@ func TestUpgrade_ParsesReferences(t *testing.T) {
 func TestAddEntry(t *testing.T) {
 	idx := NewIndex("ghcr.io", "user/repo")
 	before := time.Now()
+	h, _ := types.ParseNixHash("aaa11111111111111111111111111111")
+	d, _ := types.ParseOciDigest("sha256:abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890")
 	idx.AddEntry(
-		"aaa11111111111111111111111111111",
+		h,
 		"pkg-a",
 		"StorePath: ...",
-		"sha256:abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
+		d,
 		1024,
 		[]string{"/nix/store/bbb-dep"},
 	)
@@ -146,7 +149,8 @@ func TestAddEntry(t *testing.T) {
 func TestPinRoot(t *testing.T) {
 	idx := NewIndex("ghcr.io", "user/repo")
 	before := time.Now()
-	idx.PinRoot("aaa11111111111111111111111111111", 3600)
+	h, _ := types.ParseNixHash("aaa11111111111111111111111111111")
+	idx.PinRoot(h, 3600)
 	after := time.Now()
 
 	root, exists := idx.Roots["aaa11111111111111111111111111111"]
@@ -163,7 +167,8 @@ func TestPinRoot(t *testing.T) {
 
 func TestPinRoot_NilRoots(t *testing.T) {
 	idx := &CacheIndex{Version: 2}
-	idx.PinRoot("aaa11111111111111111111111111111", 0)
+	h, _ := types.ParseNixHash("aaa11111111111111111111111111111")
+	idx.PinRoot(h, 0)
 	if idx.Roots == nil {
 		t.Fatal("PinRoot should initialize Roots map")
 	}

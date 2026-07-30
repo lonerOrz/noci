@@ -46,9 +46,9 @@ in
     };
 
     upstream = mkOption {
-      type = types.str;
-      default = "https://cache.nixos.org";
-      description = "Fallback upstream cache.";
+      type = types.listOf types.str;
+      default = [ "https://cache.nixos.org" ];
+      description = "Fallback upstream cache URLs.";
     };
 
     tokenFile = mkOption {
@@ -56,8 +56,7 @@ in
       default = null;
       description = ''
         Path to a file containing environment variables for the proxy.
-        Used to supply `NOCI_TOKEN` or `GITHUB_TOKEN` securely
-        without exposing secrets in the world-readable Nix store.
+        Used to supply `NOCI_TOKEN` or `GITHUB_TOKEN` securely.
       '';
     };
   };
@@ -69,7 +68,9 @@ in
       wantedBy = [ "multi-user.target" ];
 
       serviceConfig = {
-        ExecStart = "${cfg.package}/bin/noci proxy --repo ${cfg.repo} --registry ${cfg.registry} --port ${toString cfg.port} --listen ${cfg.listen} --upstream ${cfg.upstream}";
+        ExecStart = "${cfg.package}/bin/noci proxy --repo ${cfg.repo} --registry ${cfg.registry} --port ${toString cfg.port} --listen ${cfg.listen} ${
+          concatMapStringsSep " " (u: "--upstream ${u}") cfg.upstream
+        }";
         Restart = "always";
         RestartSec = "5s";
 

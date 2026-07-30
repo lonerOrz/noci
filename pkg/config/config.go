@@ -50,7 +50,6 @@ type registryTarget struct {
 	Registry string `yaml:"registry"`
 	Repo     string `yaml:"repo"`
 	Token    string `yaml:"token"`
-	Mode     string `yaml:"mode"` // "push-pull" (default), "push-only", "pull-only"
 }
 
 // Load resolves configuration by merging flags, env vars, config files, git remote, and tokens.
@@ -118,9 +117,6 @@ func ResolveRegistries(values []string, base Target) ([]Target, error) {
 	if len(cfg.Registries) > 0 {
 		var entries []Target
 		for _, rt := range cfg.Registries {
-			if rt.Mode == "pull-only" {
-				continue
-			}
 			token := rt.Token
 			if token == "" {
 				token = os.Getenv("NOCI_TOKEN")

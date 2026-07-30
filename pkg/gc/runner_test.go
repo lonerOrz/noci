@@ -2,6 +2,7 @@ package gc
 
 import (
 	"context"
+	"noci/pkg/domain/types"
 	"noci/pkg/oci"
 	"testing"
 	"time"
@@ -141,7 +142,8 @@ func TestRunner_CascadeEvict(t *testing.T) {
 	store := &mockGCStore{index: idx}
 	runner := NewRunner(store, 1*time.Hour, 0, false, false)
 
-	res, err := runner.Run(context.Background(), 0, []string{"bbb22222222222222222222222222222"})
+	h, _ := types.ParseNixHash("bbb22222222222222222222222222222")
+	res, err := runner.Run(context.Background(), 0, []types.NixHash{h})
 	if err != nil {
 		t.Fatalf("Run failed: %v", err)
 	}

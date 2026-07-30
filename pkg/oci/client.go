@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"noci/pkg/domain/types"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -86,19 +88,57 @@ func (c *Client) GetBlobRedirectURL(ctx context.Context, digest string) (string,
 	return c.manifests.GetBlobRedirectURL(ctx, digest)
 }
 
-// --- Backward-compat pass-throughs used by server/handler.go ---
+// --- ports.CacheStore implementation ---
 
-func (c *Client) Request(ctx context.Context, method, path string, body io.Reader, contentType string) (*http.Response, error) {
-	return c.transport.request(ctx, method, path, body, contentType)
+func (c *Client) StreamBlob(ctx context.Context, digest types.OciDigest, w io.Writer) error {
+	resp, err := c.transport.rawRequest(ctx, "GET", "/blobs/"+digest.String(), nil, "")
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		loc := resp.Header.Get("Location")
+		return &BlobRedirectError{StatusCode: resp.StatusCode, Location: loc}
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("blob streaming failed with status %d", resp.StatusCode)
+	}
+
+	_, err = io.Copy(w, resp.Body)
+	return err
 }
 
-func (c *Client) RawRequest(ctx context.Context, method, path string, body io.Reader, contentType string) (*http.Response, error) {
-	return c.transport.rawRequest(ctx, method, path, body, contentType)
+func (c *Client) CanWrite(ctx context.Context) bool {
+	resp, err := c.transport.rawRequest(ctx, "PUT", "/manifests/noci-probe-write", nil, "")
+	if err != nil {
+		errStr := strings.ToLower(err.Error())
+		if strings.Contains(errStr, "401") || strings.Contains(errStr, "403") ||
+			strings.Contains(errStr, "unauthorized") || strings.Contains(errStr, "forbidden") {
+			return false
+		}
+		return true // non-auth error means we reached the server
+	}
+	if resp != nil {
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			return false
+		}
+	}
+
+	go func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = c.manifests.DeleteManifest(cleanupCtx, "noci-probe-write")
+	}()
+
+	return true
 }
 
 // CheckCacheStatus checks if a manifest exists and whether it's evicted.
 func (c *Client) CheckCacheStatus(ctx context.Context, tag string) (exists bool, isEvicted bool) {
-	resp, err := c.Request(ctx, "HEAD", "/manifests/"+tag, nil, MediaTypeImageManifest)
+	resp, err := c.transport.request(ctx, "HEAD", "/manifests/"+tag, nil, MediaTypeImageManifest)
 	if err != nil || resp.StatusCode != http.StatusOK {
 		if resp != nil {
 			resp.Body.Close()
@@ -115,6 +155,16 @@ func (c *Client) CheckCacheStatus(ctx context.Context, tag string) (exists bool,
 		return true, true
 	}
 	return true, false
+}
+
+// BlobRedirectError is returned by StreamBlob when the registry issues a redirect.
+type BlobRedirectError struct {
+	StatusCode int
+	Location   string
+}
+
+func (e *BlobRedirectError) Error() string {
+	return fmt.Sprintf("blob redirect (%d) to %s", e.StatusCode, e.Location)
 }
 
 // --- Progress reporting ---

@@ -2,8 +2,9 @@
 
 Zero-config Nix binary cache over OCI for GitHub Actions.
 
-**Fetch-only** (default): proxy serves cached paths. No signing key needed.
-**Push mode**: add signing key → built paths auto-push after job. Cache errors never break CI.
+- **Fetch-only (default):** proxy serves cached paths. No signing key needed.
+- **Push mode:** add signing key → built paths auto-push after job completion.
+- **Port Sync:** Uses explicit port-file signaling to avoid race conditions on ephemeral self-hosted runners.
 
 ## Quick Start
 
@@ -11,7 +12,7 @@ Zero-config Nix binary cache over OCI for GitHub Actions.
 # Fetch-only — just add this line
 - uses: lonerOrz/noci/action@v1
 
-# Push + fetch — add one input
+# Push + fetch — add signing key
 - uses: lonerOrz/noci/action@v1
   with:
     signing-key: ${{ secrets.NOCI_SIGNING_KEY }}
@@ -19,23 +20,23 @@ Zero-config Nix binary cache over OCI for GitHub Actions.
 
 ## Inputs
 
-| Input               | Description                                            | Default             |
-| :------------------ | :----------------------------------------------------- | :------------------ |
-| `signing-key`       | Nix signing key (`key_name:base64`). Omit = fetch-only | _(none)_            |
-| `registry`          | OCI registry endpoint                                  | `ghcr.io`           |
-| `repo`              | OCI repository (`owner/repo`)                          | `GITHUB_REPOSITORY` |
-| `token`             | Registry auth token                                    | `GITHUB_TOKEN`      |
-| `compression`       | `zstd` or `gzip`                                       | `zstd`              |
-| `compression-level` | 1-19 for zstd                                          | `3`                 |
-| `jobs`              | Compression threads (`0` = auto)                       | `0`                 |
-| `skip-upstream`     | Skip paths with upstream signatures                    | `true`              |
-| `fail-on-error`     | Push failures = warning, not CI failure                | `false`             |
-| `proxy-port`        | Local proxy port (`0` = random)                        | `0`                 |
+| Input               | Description                                                    | Default             |
+| :------------------ | :------------------------------------------------------------- | :------------------ |
+| `signing-key`       | Nix private signing key (`key_name:base64`). Omit = fetch-only | _(none)_            |
+| `registry`          | OCI registry endpoint                                          | `ghcr.io`           |
+| `repo`              | OCI repository (`owner/repo`)                                  | `GITHUB_REPOSITORY` |
+| `token`             | Registry auth token                                            | `GITHUB_TOKEN`      |
+| `compression`       | `zstd` or `gzip`                                               | `zstd`              |
+| `compression-level` | Zstd compression level (1-19)                                  | `3`                 |
+| `jobs`              | Compression threads (`0` = auto)                               | `0`                 |
+| `skip-upstream`     | Skip paths with upstream `cache.nixos.org` signatures          | `true`              |
+| `fail-on-error`     | Push failures = warning, not CI failure                        | `false`             |
+| `proxy-port`        | Local proxy port (`0` = dynamic ephemeral port)                | `0`                 |
 
 ## Outputs
 
-- **`proxy-url`** — HTTP address of the local proxy
-- **`pushed-count`** — Number of paths pushed to registry
+- **`proxy-url`** — HTTP address of the running local proxy
+- **`pushed-count`** — Number of store paths pushed to OCI registry
 
 ## Permissions
 

@@ -17,6 +17,7 @@ import (
 
 var (
 	pushFlags            CommonFlags
+	pushSigningKey       string
 	pushKeyFile          string
 	pushCompression      string
 	pushCompressionLevel int
@@ -44,7 +45,8 @@ var or --key-file flag.`,
 
 func init() {
 	pushFlags.Register(pushCmd)
-	pushCmd.Flags().StringVar(&pushKeyFile, "key-file", "", "Nix private signing key file (optional)")
+	pushCmd.Flags().StringVar(&pushSigningKey, "signing-key", "", "Nix private signing key string (key_name:base64) (env: NOCI_SIGNING_KEY)")
+	pushCmd.Flags().StringVar(&pushKeyFile, "key-file", "", "Nix private signing key file path (env: NOCI_KEY_FILE)")
 	pushCmd.Flags().StringVarP(&pushCompression, "compression", "c", "zstd", "Compression algorithm (zstd, gzip)")
 	pushCmd.Flags().BoolVar(&pushSkipUpstream, "skip-upstream", true, "Skip pushing packages that carry an upstream cache.nixos.org signature")
 	pushCmd.Flags().IntVarP(&pushJobs, "jobs", "j", 0, "Zstd compression threads (0 = auto: min(4, max(1, NumCPU/2)))")
@@ -89,9 +91,13 @@ func runPush(cmd *cobra.Command, args []string) error {
 	return pub.Publish(ctx, inputPaths)
 }
 
-// resolveSigner loads the signing key from env or file.
+// resolveSigner loads the signing key from flag, env, or file.
 func resolveSigner() (*nix.Signer, error) {
-	signingKey := os.Getenv("NOCI_SIGNING_KEY")
+	signingKey := pushSigningKey
+	if signingKey == "" {
+		signingKey = os.Getenv("NOCI_SIGNING_KEY")
+	}
+
 	keyFile := pushKeyFile
 	if keyFile == "" {
 		keyFile = os.Getenv("NOCI_KEY_FILE")
@@ -99,8 +105,7 @@ func resolveSigner() (*nix.Signer, error) {
 
 	if signingKey == "" && keyFile == "" {
 		return nil, fmt.Errorf("signing key is required to guarantee cache integrity. " +
-			"Please specify your private key via the NOCI_SIGNING_KEY environment variable " +
-			"or the --key-file flag")
+			"Please specify via --signing-key, --key-file, or NOCI_SIGNING_KEY / NOCI_KEY_FILE environment variables")
 	}
 
 	if signingKey != "" {

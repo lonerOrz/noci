@@ -1,6 +1,7 @@
 package oci
 
 import (
+	"noci/pkg/domain/types"
 	"strings"
 	"sync"
 	"time"
@@ -92,16 +93,14 @@ func (idx *CacheIndex) Upgrade() {
 	}
 }
 
-func (idx *CacheIndex) AddEntry(hash, name, narinfo, digest string, size int64, refs []string) {
+func (idx *CacheIndex) AddEntry(hash types.NixHash, name, narinfo string, digest types.OciDigest, size int64, refs []string) {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
 	now := time.Now()
-	// Strip "sha256:" prefix so NarDigest stores bare hex.
-	hex := strings.TrimPrefix(digest, "sha256:")
-	idx.Entries[hash] = IndexItem{
+	idx.Entries[hash.String()] = IndexItem{
 		Name:       name,
 		NarInfo:    narinfo,
-		NarDigest:  hex,
+		NarDigest:  digest.BareHex(),
 		NarSize:    size,
 		Added:      now,
 		LastUsed:   now,
@@ -111,13 +110,13 @@ func (idx *CacheIndex) AddEntry(hash, name, narinfo, digest string, size int64, 
 	idx.Generated = now
 }
 
-func (idx *CacheIndex) PinRoot(hash string, ttlSeconds int64) {
+func (idx *CacheIndex) PinRoot(hash types.NixHash, ttlSeconds int64) {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
 	if idx.Roots == nil {
 		idx.Roots = make(map[string]GCRoot)
 	}
-	idx.Roots[hash] = GCRoot{
+	idx.Roots[hash.String()] = GCRoot{
 		PinnedAt: time.Now(),
 		TTL:      ttlSeconds,
 	}
