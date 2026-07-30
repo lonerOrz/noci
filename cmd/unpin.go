@@ -2,7 +2,7 @@ package cmd
 
 import (
 	"fmt"
-	"noci/pkg/config"
+	"noci/pkg/app"
 	"noci/pkg/log"
 	"noci/pkg/oci"
 
@@ -31,8 +31,7 @@ func runUnpin(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Resolve inputs: no nix build fallback.
-	inputHashes, err := config.ResolveHashes(ctx, args, false)
+	hashes, err := app.NewTargetResolver(nil).ResolveHashes(ctx, args, false)
 	if err != nil {
 		return err
 	}
@@ -44,10 +43,11 @@ func runUnpin(cmd *cobra.Command, args []string) error {
 	}
 
 	modified := false
-	for _, hash := range inputHashes {
+	for _, hash := range hashes {
+		h := hash.String()
 		if index.Roots != nil {
-			if _, exists := index.Roots[hash]; exists {
-				delete(index.Roots, hash)
+			if _, exists := index.Roots[h]; exists {
+				delete(index.Roots, h)
 				log.Success("Successfully unpinned root hash: %s", hash)
 				modified = true
 			} else {

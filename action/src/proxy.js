@@ -3,20 +3,16 @@ const fs = require("fs");
 const http = require("http");
 const utils = require("./utils");
 
-const PORT_PATTERN = /Proxy running on http:\/\/\[?[a-zA-Z0-9.:-]+\]?:([0-9]+)/;
-
 async function startProxy(binPath, proxyPort) {
   const runId = process.env.GITHUB_RUN_ID || "default";
   const runAttempt = process.env.GITHUB_RUN_ATTEMPT || "1";
   const suffix = `${runId}-${runAttempt}`;
 
-  // Isolated paths per run attempt — prevents cross-job collisions on self-hosted runners
   const hookLogPath = `/tmp/noci-build-paths-${suffix}.log`;
   const hookScriptPath = `/tmp/noci-hook-${suffix}.sh`;
   utils.saveState("hook-log-path", hookLogPath);
   utils.saveState("hook-script-path", hookScriptPath);
 
-  // Write post-build-hook that collects built paths
   fs.writeFileSync(
     hookScriptPath,
     `#!/bin/sh
@@ -28,18 +24,21 @@ done`,
     { mode: 0o755 },
   );
 
-  // Start proxy daemon
   const logPath = `/tmp/noci-proxy-${suffix}.log`;
+  const portFilePath = `/tmp/noci-proxy-${suffix}.port`;
   const logFd = fs.openSync(logPath, "w");
-  const proc = cp.spawn(binPath, ["proxy", "--port", proxyPort], {
-    detached: true,
-    stdio: ["ignore", logFd, logFd],
-  });
+  const proc = cp.spawn(
+    binPath,
+    ["proxy", "--port", proxyPort, "--port-file", portFilePath],
+    {
+      detached: true,
+      stdio: ["ignore", logFd, logFd],
+    },
+  );
   proc.unref();
   utils.saveState("proxy-pid", proc.pid.toString());
 
-  // Wait for port + fetch public key + configure Nix
-  const port = await waitForPort(proc, logPath);
+  const port = await waitForPortFile(portFilePath);
   const proxyUrl = `http://127.0.0.1:${port}`;
   utils.exportOutput("proxy-url", proxyUrl);
 
@@ -49,28 +48,19 @@ done`,
   console.log(`[noci-action] Proxy active at ${proxyUrl}`);
 }
 
-function waitForPort(proc, logPath, timeoutMs = 30000) {
+function waitForPortFile(portFilePath, timeoutMs = 30000) {
   const deadline = Date.now() + timeoutMs;
 
   return new Promise((resolve, reject) => {
     const timer = setInterval(() => {
-      if (proc.exitCode !== null) {
-        clearInterval(timer);
-        const log = fs.existsSync(logPath)
-          ? fs.readFileSync(logPath, "utf8")
-          : "";
-        return reject(
-          new Error(`Proxy exited with code ${proc.exitCode}: ${log}`),
-        );
-      }
-
-      if (fs.existsSync(logPath)) {
-        const content = fs.readFileSync(logPath, "utf8");
-        const match = content.match(PORT_PATTERN);
-        if (match) {
-          clearInterval(timer);
-          return resolve(match[1]);
-        }
+      if (fs.existsSync(portFilePath)) {
+        try {
+          const port = fs.readFileSync(portFilePath, "utf8").trim();
+          if (port) {
+            clearInterval(timer);
+            return resolve(port);
+          }
+        } catch {}
       }
 
       if (Date.now() >= deadline) {

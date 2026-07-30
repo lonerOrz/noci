@@ -1,15 +1,15 @@
 # noci (Nix over OCI)
 
-Stateless Nix binary cache over OCI container registries. No database, no server — just push to GHCR, pull through a proxy.
+Stateless Nix binary cache over OCI container registries (e.g. GitHub Container Registry). No database, no server — just push to GHCR and pull through a proxy.
 
 ## Features
 
-- **push** — Analyzes closure, filters upstream-cached packages, concurrent upload with zstd/gzip compression
-- **proxy** — Local HTTP proxy converting Nix fetches to OCI layer downloads, cascading upstream fallback
-- **search** — Fuzzy-search cached packages by name, hash, store path, or Flake URI
-- **gc** — Mark-sweep garbage collection with quotas, grace periods, and cascade eviction
-- **pin/unpin** — Protect critical packages from GC
-- **index repair** — Reconcile OCI manifests with the index
+- **push:** Parallel closure analysis, filters upstream-cached packages, concurrent uploads with zstd/gzip compression and multi-registry targets.
+- **proxy:** Client-side local HTTP proxy converting Nix substituter fetches to OCI layer downloads, with zero-copy stream forwarding and optional upstream fallback.
+- **search:** Fuzzy-search cached packages by name, 32-char Nix hash, store path, or Flake URI.
+- **gc:** Mark-sweep garbage collection with quota budgets, grace periods, TTL roots, and cascading eviction.
+- **pin / unpin:** Protect critical packages or Flake targets from garbage collection.
+- **index repair / clean:** Reconcile and prune OCI manifests against the cache index.
 
 ## Install
 
@@ -29,34 +29,47 @@ export NOCI_REPO="username/repo"
 export NOCI_SIGNING_KEY=$(cat secret.key)
 export GH_TOKEN="ghp_xxx"
 
-# 3. Push a package
-noci push .#my-package
+# 3. Push a Flake package (supports --signing-key or --key-file)
+noci push .#my-package --signing-key "$(cat secret.key)"
 
-# 4. Use the cache
+# 4. Use the local proxy
 noci proxy --repo username/repo --port 8080 &
-nix build .#my-package --substituters "http://127.0.0.1:8080" --trusted-public-keys "$(cat public.key)"
+nix build .#my-package \
+  --substituters "http://127.0.0.1:8080" \
+  --trusted-public-keys "$(cat public.key)"
 ```
 
 Token resolution: `NOCI_TOKEN` → `GITHUB_TOKEN` → `GH_TOKEN` → `gh auth token` → `~/.docker/config.json`
 
-## Commands
+## CLI Commands Reference
 
 ```bash
-noci push .#package                        # push with auto compression
-noci push .#package --jobs 4               # push with 4-thread zstd
-noci pin .#package --ttl 30d               # pin for 30 days
-noci search                                # list all cached packages
-noci search sonar                          # search by name
-noci search /nix/store/g5jgc...-sonar-0.4  # search by store path
-noci gc --max-size 5GB --dry-run           # preview garbage collection
-noci gc g5jgc... hszsl...                  # cascade-evict specific packages
-noci index repair --dry-run                # preview index repairs
+# Push targets with parallel zstd compression threads
+noci push .#package --jobs 4 --signing-key "$NOCI_SIGNING_KEY"
+
+# Pin critical outputs for 30 days
+noci pin .#package --ttl 30d
+
+# Search cached packages
+noci search sonar
+noci search /nix/store/g5jgc...-sonar-0.4
+
+# Start proxy daemon and write dynamic port to file
+noci proxy --repo username/repo --port 0 --port-file /tmp/noci-proxy.port --upstream https://cache.nixos.org
+
+# Run quota-based garbage collection
+noci gc --max-size 15GB --grace-period 360h --physical-sweep --dry-run=false
+
+# Reconcile index entries against remote OCI manifests
+noci index repair
+noci index clean --delete
 ```
 
 ## GitHub Actions
 
 ```yaml
-permissions: { packages: write }
+permissions: { packages: write, contents: read }
+
 steps:
   - uses: actions/checkout@v4
   - uses: cachix/install-nix-action@v30
@@ -77,6 +90,6 @@ services.noci-proxy = {
   tokenFile = "/path/to/token.env";
   # registry = "ghcr.io";
   # port = 37515;
-  # upstream = "https://cache.nixos.org";
+  # upstream = [ "https://cache.nixos.org" ];
 };
 ```

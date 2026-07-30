@@ -7,8 +7,10 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"noci/pkg/domain/ports"
 	"noci/pkg/log"
 	"noci/pkg/oci"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -32,8 +34,8 @@ func (m *metrics) inc(method, path, status, source string) {
 type Server struct {
 	addr           string
 	upstream       string
-	client         oci.Store
-	rawClient      *oci.Client
+	store          ports.CacheStore
+	portFile       string
 	upstreamProxy  *httputil.ReverseProxy
 	upstreamExtras []*httputil.ReverseProxy
 	indexMu        sync.RWMutex
@@ -46,44 +48,37 @@ type Server struct {
 	metrics        metrics
 	limiter        *rateLimiter
 	cb             *CircuitBreaker
-	cacheSvc       *CacheService
-	adminSvc       *AdminService
 }
 
-func NewServer(registry, repo, token, addr, upstream, authKey string, rateLimit float64, extraUpstreams []string) *Server {
+func NewServer(registry, repo, token, addr, authKey string, rateLimit float64, upstreams []string) *Server {
 	if registry == "" || repo == "" || addr == "" {
 		panic("server: registry, repo, and addr must not be empty")
 	}
 
 	client := oci.NewClient(registry, repo, token)
 
-	targetURL, err := url.Parse(upstream)
+	var primaryUpstream string
 	var proxy *httputil.ReverseProxy
-	if err == nil {
-		proxy = httputil.NewSingleHostReverseProxy(targetURL)
-		originalDirector := proxy.Director
-		proxy.Director = func(req *http.Request) {
-			originalDirector(req)
-			req.Host = targetURL.Host
-		}
-	} else {
-		log.Warning("Upstream proxy init failed: %v", err)
-	}
-
 	var extras []*httputil.ReverseProxy
-	for _, eu := range extraUpstreams {
-		euURL, err := url.Parse(eu)
+
+	for i, u := range upstreams {
+		targetURL, err := url.Parse(u)
 		if err != nil {
-			log.Warning("Extra upstream %q parse failed: %v", eu, err)
+			log.Warning("Upstream %q parse failed: %v", u, err)
 			continue
 		}
-		ep := httputil.NewSingleHostReverseProxy(euURL)
-		origDir := ep.Director
-		ep.Director = func(req *http.Request) {
+		p := httputil.NewSingleHostReverseProxy(targetURL)
+		origDir := p.Director
+		p.Director = func(req *http.Request) {
 			origDir(req)
-			req.Host = euURL.Host
+			req.Host = targetURL.Host
 		}
-		extras = append(extras, ep)
+		if i == 0 {
+			primaryUpstream = u
+			proxy = p
+		} else {
+			extras = append(extras, p)
+		}
 	}
 
 	var limiter *rateLimiter
@@ -95,11 +90,10 @@ func NewServer(registry, repo, token, addr, upstream, authKey string, rateLimit 
 		limiter = newRateLimiter(rateLimit, burst)
 	}
 
-	s := &Server{
+	return &Server{
 		addr:           addr,
-		upstream:       upstream,
-		client:         client,
-		rawClient:      client,
+		upstream:       primaryUpstream,
+		store:          client,
 		upstreamProxy:  proxy,
 		upstreamExtras: extras,
 		authKey:        authKey,
@@ -107,9 +101,10 @@ func NewServer(registry, repo, token, addr, upstream, authKey string, rateLimit 
 		limiter:        limiter,
 		cb:             NewCircuitBreaker(5, 30*time.Second),
 	}
-	s.cacheSvc = newCacheService(s)
-	s.adminSvc = newAdminService(s)
-	return s
+}
+
+func (s *Server) SetPortFile(path string) {
+	s.portFile = path
 }
 
 // withMiddleware wraps a handler with auth, rate limiting, and logging.
@@ -195,7 +190,7 @@ func (s *Server) setupMux() *http.ServeMux {
 
 func (s *Server) Start(ctx context.Context) error {
 	warmCtx, cancel := context.WithTimeout(ctx, oci.DefaultHTTPTimeout)
-	if exists, digest := s.client.ManifestExists(warmCtx, "noci-index"); exists {
+	if exists, digest := s.store.ManifestExists(warmCtx, "noci-index"); exists {
 		s.lastDigest = digest
 	}
 	if err := s.RefreshIndex(warmCtx); err != nil {
@@ -226,6 +221,10 @@ func (s *Server) Start(ctx context.Context) error {
 		_ = srv.Shutdown(shutdownCtx)
 	}()
 
+	boundPort := listener.Addr().(*net.TCPAddr).Port
+	if s.portFile != "" {
+		_ = os.WriteFile(s.portFile, []byte(strconv.Itoa(boundPort)), 0644)
+	}
 	log.Success("Proxy running on http://%s", listener.Addr().String())
 	if err := srv.Serve(listener); err != http.ErrServerClosed {
 		return err
@@ -234,7 +233,7 @@ func (s *Server) Start(ctx context.Context) error {
 }
 
 func (s *Server) RefreshIndex(ctx context.Context) error {
-	idx, err := s.client.FetchIndex(ctx)
+	idx, err := s.store.FetchIndex(ctx)
 	if err != nil {
 		return err
 	}
@@ -261,36 +260,8 @@ func (s *Server) StartPreflightProbe() {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		s.canDelete = s.probeWriteCapability(ctx)
+		s.canDelete = s.store.CanWrite(ctx)
 	}()
-}
-
-func (s *Server) probeWriteCapability(ctx context.Context) bool {
-	resp, err := s.rawClient.RawRequest(ctx, "PUT", "/manifests/noci-probe-write", nil, "")
-	if err != nil {
-		errStr := strings.ToLower(err.Error())
-		if strings.Contains(errStr, "401") || strings.Contains(errStr, "403") ||
-			strings.Contains(errStr, "unauthorized") || strings.Contains(errStr, "forbidden") {
-			log.Warning("[noci-proxy] OCI Registry write capability: DISABLED (read-only token)")
-			return false
-		}
-	}
-	if resp != nil {
-		defer resp.Body.Close()
-		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-			log.Warning("[noci-proxy] OCI Registry write capability: DISABLED (Status %d)", resp.StatusCode)
-			return false
-		}
-	}
-
-	go func() {
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		_ = s.client.DeleteManifest(cleanupCtx, "noci-probe-write")
-	}()
-
-	log.Info("[noci-proxy] OCI Registry write capability: ENABLED")
-	return true
 }
 
 func (s *Server) startActiveSyncLoop(ctx context.Context, interval time.Duration) {
@@ -302,7 +273,7 @@ func (s *Server) startActiveSyncLoop(ctx context.Context, interval time.Duration
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			exists, remoteDigest := s.client.ManifestExists(ctx, "noci-index")
+			exists, remoteDigest := s.store.ManifestExists(ctx, "noci-index")
 			if !exists {
 				continue
 			}

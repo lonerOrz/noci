@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"noci/pkg/app"
 	"noci/pkg/config"
 	"noci/pkg/gc"
 	"noci/pkg/log"
@@ -61,7 +62,7 @@ func runGC(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("parse grace-period: %w", err)
 	}
 
-	inputHashes, err := config.ResolveHashes(ctx, args, false)
+	hashes, err := app.NewTargetResolver(nil).ResolveHashes(ctx, args, false)
 	if err != nil {
 		return err
 	}
@@ -69,7 +70,7 @@ func runGC(cmd *cobra.Command, args []string) error {
 	client := oci.NewClient(cfg.Registry, cfg.Repo, cfg.Token)
 	runner := gc.NewRunner(client, dur, gcKeepVersions, gcPhysicalSweep, gcDryRun)
 
-	result, err := runner.Run(ctx, maxBytes, inputHashes)
+	result, err := runner.Run(ctx, maxBytes, hashes)
 	if err != nil {
 		return err
 	}

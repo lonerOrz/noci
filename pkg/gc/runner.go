@@ -3,6 +3,7 @@ package gc
 import (
 	"context"
 	"fmt"
+	"noci/pkg/domain/types"
 	"noci/pkg/log"
 	"noci/pkg/oci"
 	"sync"
@@ -42,7 +43,7 @@ func NewRunner(store oci.Store, gracePeriod time.Duration, keepVersions int, phy
 
 // Run executes the full GC lifecycle. maxSize=0 means no quota limit.
 // targets non-empty triggers CascadeEvict; otherwise Sweep runs.
-func (r *Runner) Run(ctx context.Context, maxSize int64, targets []string) (*Result, error) {
+func (r *Runner) Run(ctx context.Context, maxSize int64, targets []types.NixHash) (*Result, error) {
 	index, err := r.store.FetchIndex(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch index: %w", err)
@@ -51,10 +52,15 @@ func (r *Runner) Run(ctx context.Context, maxSize int64, targets []string) (*Res
 	engine := NewEngine(index, r.gracePeriod)
 	engine.SetKeepVersions(r.keepVersions)
 
+	targetStrings := make([]string, len(targets))
+	for i, t := range targets {
+		targetStrings[i] = t.String()
+	}
+
 	var result *Result
-	if len(targets) > 0 {
-		r.logger.Action("Targeted eviction resolved to %d input hashes.", len(targets))
-		result = engine.CascadeEvict(targets)
+	if len(targetStrings) > 0 {
+		r.logger.Action("Targeted eviction resolved to %d input hashes.", len(targetStrings))
+		result = engine.CascadeEvict(targetStrings)
 	} else {
 		result = engine.Sweep(time.Now(), maxSize)
 	}

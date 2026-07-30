@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"noci/pkg/app"
 	"noci/pkg/config"
 	"noci/pkg/log"
 	"noci/pkg/oci"
@@ -44,8 +45,7 @@ func runPin(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("invalid --ttl value: %w", err)
 	}
 
-	// Resolve inputs: allow nix build fallback.
-	inputHashes, err := config.ResolveHashes(ctx, args, true)
+	hashes, err := app.NewTargetResolver(nil).ResolveHashes(ctx, args, true)
 	if err != nil {
 		return err
 	}
@@ -56,8 +56,8 @@ func runPin(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("fetch index: %w", err)
 	}
 
-	for _, hash := range inputHashes {
-		if _, exists := index.Entries[hash]; !exists {
+	for _, hash := range hashes {
+		if _, exists := index.Entries[hash.String()]; !exists {
 			log.Warning("Hash %s is not currently in the OCI cache entries. Pinned as root anyway.", hash)
 		}
 		index.PinRoot(hash, ttlSeconds)

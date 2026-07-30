@@ -3,14 +3,17 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
 	"noci/dist"
+	"noci/pkg/domain/types"
 	"noci/pkg/log"
 	"noci/pkg/oci"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -165,7 +168,7 @@ func (s *Server) handleFavicon(w http.ResponseWriter, r *http.Request) {
 // --- Public key ---
 
 func (s *Server) handlePublicKey(w http.ResponseWriter, r *http.Request) {
-	pubKey, err := s.adminSvc.FetchPublicKey(r.Context())
+	pubKey, err := s.fetchPublicKey(r.Context())
 	if err != nil {
 		log.Warning("Failed to fetch public-key: %v", err)
 		http.Error(w, "Public key not found", http.StatusNotFound)
@@ -192,7 +195,7 @@ func (s *Server) handleNarInfoRoute(w http.ResponseWriter, r *http.Request) {
 	hash := strings.TrimSuffix(r.URL.Path, ".narinfo")
 	hash = strings.TrimPrefix(hash, "/")
 
-	content, found := s.cacheSvc.GetNarInfo(hash)
+	content, found := s.getNarInfo(hash)
 	if !found {
 		setSource(w, "upstream")
 		s.proxyToUpstream(w, r, hash+".narinfo")
@@ -209,7 +212,7 @@ func (s *Server) handleNarInfoRoute(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleNarRoute(w http.ResponseWriter, r *http.Request) {
 	filename := r.PathValue("filename")
 
-	digest, found := s.cacheSvc.ResolveNarDigest(filename)
+	digest, found := s.resolveNarDigest(filename)
 	if !found {
 		setSource(w, "upstream")
 		s.proxyToUpstream(w, r, "nar/"+filename)
@@ -220,37 +223,242 @@ func (s *Server) handleNarRoute(w http.ResponseWriter, r *http.Request) {
 	s.streamBlob(w, r, digest)
 }
 
-func (s *Server) streamBlob(w http.ResponseWriter, r *http.Request, digest string) {
+func (s *Server) streamBlob(w http.ResponseWriter, r *http.Request, rawDigest string) {
+	digest, err := types.ParseOciDigest(rawDigest)
+	if err != nil {
+		http.Error(w, "Invalid digest format", http.StatusBadRequest)
+		return
+	}
+
 	ctx, cancel := context.WithTimeout(r.Context(), oci.DefaultStreamTimeout)
 	defer cancel()
 
-	resp, err := s.rawClient.RawRequest(ctx, "GET", "/blobs/"+digest, nil, "")
-	if err != nil {
-		http.Error(w, "Failed to stream archive", http.StatusNotFound)
-		return
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
-		w.Header().Set("Location", resp.Header.Get("Location"))
-		w.WriteHeader(resp.StatusCode)
-		return
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		http.Error(w, "Failed to stream archive", http.StatusNotFound)
-		return
-	}
-
 	w.Header().Set("Content-Type", "application/x-nix-nar")
-	if resp.ContentLength > 0 {
-		w.Header().Set("Content-Length", fmt.Sprintf("%d", resp.ContentLength))
+	if err := s.store.StreamBlob(ctx, digest, w); err != nil {
+		var re *oci.BlobRedirectError
+		if errors.As(err, &re) {
+			w.Header().Set("Location", re.Location)
+			w.WriteHeader(re.StatusCode)
+			return
+		}
+		http.Error(w, "Failed to stream archive", http.StatusNotFound)
+		return
+	}
+}
+
+// --- Cache service methods (inlined from cache.go) ---
+
+func (s *Server) getNarInfo(hash string) (string, bool) {
+	if len(hash) != 32 {
+		return "", false
 	}
 
-	buf := bufferPool.Get().([]byte)
-	defer bufferPool.Put(buf)
+	if val, exists := s.negCache.Load(hash); exists {
+		if time.Since(val.(time.Time)) <= 5*time.Second {
+			return "", false
+		}
+		s.negCache.Delete(hash)
+	}
 
-	_, _ = io.CopyBuffer(w, resp.Body, buf)
+	s.indexMu.RLock()
+	var entry oci.IndexItem
+	var found bool
+	if s.index != nil && s.index.Entries != nil {
+		entry, found = s.index.Entries[hash]
+	}
+	s.indexMu.RUnlock()
+
+	if !found {
+		s.negCache.Store(hash, time.Now())
+		return "", false
+	}
+
+	content := s.rewriteNarInfoURL(&entry)
+	if content == "" {
+		return "", false
+	}
+	return content, true
+}
+
+func (s *Server) rewriteNarInfoURL(entry *oci.IndexItem) string {
+	narinfo := entry.NarInfo
+	if narinfo == "" {
+		return ""
+	}
+	digest := entry.NarDigest
+	lines := strings.Split(narinfo, "\n")
+	for i, line := range lines {
+		if strings.HasPrefix(line, "URL: ") {
+			ext := ".nar.gz"
+			if strings.HasSuffix(line, ".nar.zst") {
+				ext = ".nar.zst"
+			}
+			lines[i] = "URL: nar/" + digest + ext
+			break
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (s *Server) resolveNarDigest(filename string) (string, bool) {
+	digest := filename
+	if idx := strings.Index(filename, "."); idx != -1 {
+		digest = filename[:idx]
+	}
+
+	if len(digest) == 64 {
+		return "sha256:" + digest, true
+	}
+
+	if len(digest) == 32 {
+		s.indexMu.RLock()
+		var entry oci.IndexItem
+		var found bool
+		if s.index != nil && s.index.Entries != nil {
+			entry, found = s.index.Entries[digest]
+		}
+		s.indexMu.RUnlock()
+
+		if found {
+			return "sha256:" + entry.NarDigest, true
+		}
+	}
+
+	return "", false
+}
+
+// --- Admin service methods (inlined from admin.go) ---
+
+func (s *Server) fetchPublicKey(ctx context.Context) (string, error) {
+	manifest, err := s.store.FetchManifest(ctx, "public-key")
+	if err != nil {
+		return "", err
+	}
+	if manifest != nil && manifest.Annotations != nil {
+		if pubKey := manifest.Annotations["org.nix.public_key"]; pubKey != "" {
+			return pubKey, nil
+		}
+	}
+	return "", fmt.Errorf("public key annotation not found")
+}
+
+func (s *Server) deletePackage(ctx context.Context, hash string) error {
+	log.Action("[noci-proxy] Received web request to delete package hash: %s", hash)
+
+	index, err := s.store.FetchIndex(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to fetch index from OCI: %w", err)
+	}
+
+	if _, exists := index.Entries[hash]; !exists {
+		return fmt.Errorf("package not found in cache")
+	}
+
+	delete(index.Entries, hash)
+	if index.Roots != nil {
+		delete(index.Roots, hash)
+	}
+
+	log.Action("[noci-proxy] Saving updated index back to OCI...")
+	if err := s.store.PushIndex(ctx, index); err != nil {
+		return fmt.Errorf("failed to update OCI index (verify write permissions): %w", err)
+	}
+
+	newDigest := fmt.Sprintf("%s-dirty-%d", s.lastDigest, time.Now().UnixNano())
+	s.indexMu.Lock()
+	s.index = index
+	s.lastDigest = newDigest
+	s.indexMu.Unlock()
+
+	go func() {
+		bgCtx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+		defer cancel()
+
+		log.Action("[noci-proxy][bg] Deleting physical manifest from OCI: %s", hash)
+		if err := s.store.DeleteManifest(bgCtx, hash); err != nil {
+			log.Warning("[noci-proxy][bg] Optional: Failed to physically delete OCI manifest %s: %v", hash, err)
+		}
+
+		log.Action("[noci-proxy][bg] Finalizing local index refresh...")
+		if err := s.RefreshIndex(bgCtx); err != nil {
+			log.Warning("[noci-proxy][bg] Failed to refresh local proxy memory cache: %v", err)
+		}
+	}()
+
+	return nil
+}
+
+type PaginatedResponse struct {
+	Total       int              `json:"total"`
+	Page        int              `json:"page"`
+	Limit       int              `json:"limit"`
+	CanDelete   bool             `json:"canDelete"`
+	Repo        string           `json:"repo"`
+	Registry    string           `json:"registry"`
+	GlobalCount int64            `json:"globalCount"`
+	GlobalSize  int64            `json:"globalSize"`
+	Entries     []PaginatedEntry `json:"entries"`
+}
+
+type PaginatedEntry struct {
+	Hash string `json:"hash"`
+	oci.IndexItem
+}
+
+func (s *Server) getPaginatedIndex(page, limit int, search string) (*PaginatedResponse, error) {
+	s.indexMu.RLock()
+	defer s.indexMu.RUnlock()
+
+	if s.index == nil {
+		return nil, fmt.Errorf("index not ready")
+	}
+
+	var globalSize int64
+	for _, entry := range s.index.Entries {
+		globalSize += entry.NarSize
+	}
+
+	search = strings.ToLower(strings.TrimSpace(search))
+	var filtered []PaginatedEntry
+	for hash, entry := range s.index.Entries {
+		if search != "" {
+			nameMatch := strings.Contains(strings.ToLower(entry.Name), search)
+			hashMatch := strings.Contains(strings.ToLower(hash), search)
+			if !nameMatch && !hashMatch {
+				continue
+			}
+		}
+		filtered = append(filtered, PaginatedEntry{
+			Hash:      hash,
+			IndexItem: entry,
+		})
+	}
+
+	sort.Slice(filtered, func(i, j int) bool {
+		return filtered[i].Added.After(filtered[j].Added)
+	})
+
+	total := len(filtered)
+	startIndex := (page - 1) * limit
+	endIndex := startIndex + limit
+	if startIndex > total {
+		startIndex = total
+	}
+	if endIndex > total {
+		endIndex = total
+	}
+
+	return &PaginatedResponse{
+		Total:       total,
+		Page:        page,
+		Limit:       limit,
+		CanDelete:   s.canDelete,
+		Repo:        s.index.Repo,
+		Registry:    s.index.Registry,
+		GlobalCount: int64(len(s.index.Entries)),
+		GlobalSize:  globalSize,
+		Entries:     filtered[startIndex:endIndex],
+	}, nil
 }
 
 // --- Upstream proxy fallback ---
@@ -489,7 +697,7 @@ func (s *Server) handleAPIIndex(w http.ResponseWriter, r *http.Request) {
 	}
 	search := query.Get("search")
 
-	response, err := s.adminSvc.GetPaginatedIndex(page, limit, search)
+	response, err := s.getPaginatedIndex(page, limit, search)
 	if err != nil {
 		http.Error(w, "Index not ready", http.StatusServiceUnavailable)
 		return
@@ -509,7 +717,7 @@ func (s *Server) handleAPIDeleteRoute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.adminSvc.DeletePackage(r.Context(), hash); err != nil {
+	if err := s.deletePackage(r.Context(), hash); err != nil {
 		msg := err.Error()
 		if strings.Contains(msg, "not found") {
 			http.Error(w, msg, http.StatusNotFound)

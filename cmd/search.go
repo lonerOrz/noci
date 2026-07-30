@@ -3,7 +3,7 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
-	"noci/pkg/config"
+	"noci/pkg/app"
 	"noci/pkg/log"
 	"noci/pkg/oci"
 	"os"
@@ -58,10 +58,11 @@ func runSearch(cmd *cobra.Command, args []string) error {
 			matched = append(matched, match{hash: hash, item: entry})
 		}
 	} else {
-		resolved, err := config.ResolveHashes(ctx, args, false)
-		if err == nil && len(resolved) > 0 {
+		hashes, err := app.NewTargetResolver(nil).ResolveHashes(ctx, args, false)
+		if err == nil && len(hashes) > 0 {
 			seen := make(map[string]bool)
-			for _, rh := range resolved {
+			for _, h := range hashes {
+				rh := h.String()
 				if seen[rh] {
 					continue
 				}

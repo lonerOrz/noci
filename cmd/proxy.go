@@ -13,10 +13,10 @@ var (
 	proxyFlags     CommonFlags
 	proxyPort      int
 	proxyListen    string
-	proxyUpstream  string
 	proxyUpstreams []string
 	proxyAuthKey   string
 	proxyRateLimit float64
+	proxyPortFile  string
 )
 
 var proxyCmd = &cobra.Command{
@@ -36,10 +36,10 @@ func init() {
 	proxyFlags.Register(proxyCmd)
 	proxyCmd.Flags().IntVar(&proxyPort, "port", 37515, "Port to listen on")
 	proxyCmd.Flags().StringVar(&proxyListen, "listen", "127.0.0.1", "Listen address")
-	proxyCmd.Flags().StringVar(&proxyUpstream, "upstream", "https://cache.nixos.org", "Fallback upstream cache")
-	proxyCmd.Flags().StringArrayVar(&proxyUpstreams, "upstreams", nil, "Additional upstream caches (can be specified multiple times)")
+	proxyCmd.Flags().StringArrayVar(&proxyUpstreams, "upstream", []string{"https://cache.nixos.org"}, "Fallback upstream cache URLs (can be specified multiple times)")
 	proxyCmd.Flags().StringVar(&proxyAuthKey, "auth-key", "", "Authentication key for proxy access (env: NOCI_AUTH_KEY)")
 	proxyCmd.Flags().Float64Var(&proxyRateLimit, "rate-limit", 0, "Max requests per second per IP (0 = unlimited)")
+	proxyCmd.Flags().StringVar(&proxyPortFile, "port-file", "", "Write resolved listening port to file")
 }
 
 func runProxy(cmd *cobra.Command, args []string) error {
@@ -56,7 +56,10 @@ func runProxy(cmd *cobra.Command, args []string) error {
 	}
 
 	addr := proxyListen + ":" + strconv.Itoa(proxyPort)
-	srv := server.NewServer(cfg.Registry, cfg.Repo, cfg.Token, addr, proxyUpstream, authKey, proxyRateLimit, proxyUpstreams)
+	srv := server.NewServer(cfg.Registry, cfg.Repo, cfg.Token, addr, authKey, proxyRateLimit, proxyUpstreams)
+	if proxyPortFile != "" {
+		srv.SetPortFile(proxyPortFile)
+	}
 
 	log.Info("Target OCI repository: %s/%s", cfg.Registry, cfg.Repo)
 	return srv.Start(ctx)

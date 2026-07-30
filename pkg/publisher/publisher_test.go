@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
+	"noci/pkg/domain/types"
 	"noci/pkg/log"
 	"noci/pkg/nix"
 	"noci/pkg/oci"
@@ -212,20 +213,24 @@ func TestStageMergeIndex(t *testing.T) {
 	// No index digest set → slow path, FetchIndex returns the existing index
 	pub := &Publisher{logger: log.DefaultLogger{}}
 
+	h1, _ := types.ParseNixHash("0abc1234567890abc1234567890abc12")
+	d1, _ := types.ParseOciDigest("sha256:1111111111111111111111111111111111111111111111111111111111111111")
+	h2, _ := types.ParseNixHash("1d8f2345678901d8f2345678901d8f23")
+	d2, _ := types.ParseOciDigest("sha256:2222222222222222222222222222222222222222222222222222222222222222")
 	results := []uploadResult{
 		{
-			hash:    "0abc1234567890abc1234567890abc12",
+			hash:    h1,
 			name:    "test-package",
 			narinfo: "StorePath: /nix/store/test-package\n",
-			digest:  "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+			digest:  d1,
 			size:    2048,
 			refs:    []string{"/nix/store/dep1"},
 		},
 		{
-			hash:    "1def2345678901def2345678901def23",
+			hash:    h2,
 			name:    "another-package",
 			narinfo: "StorePath: /nix/store/another-package\n",
-			digest:  "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+			digest:  d2,
 			size:    4096,
 			refs:    []string{"/nix/store/dep1", "/nix/store/dep2"},
 		},
@@ -241,7 +246,7 @@ func TestStageMergeIndex(t *testing.T) {
 	}
 
 	for _, res := range results {
-		entry, ok := mock.pushedIndex.Entries[res.hash]
+		entry, ok := mock.pushedIndex.Entries[res.hash.String()]
 		if !ok {
 			t.Errorf("expected entry for hash %s", res.hash)
 			continue

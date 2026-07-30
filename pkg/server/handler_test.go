@@ -114,7 +114,7 @@ func TestStreamBlob_RedirectHandling(t *testing.T) {
 	client := oci.NewClient(registry, "user/repo", "test-token")
 	client.SetHTTPClient(mockServer.Client())
 
-	s := &Server{client: client, rawClient: client}
+	s := &Server{store: client}
 
 	codes := []int{
 		http.StatusMovedPermanently,
@@ -155,8 +155,6 @@ func TestHandleNarInfoRoute_CacheHit(t *testing.T) {
 	}
 	s.indexMu.Unlock()
 
-	s.cacheSvc = newCacheService(s)
-
 	req := httptest.NewRequest("GET", "/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.narinfo", nil)
 	req.SetPathValue("hash", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 	w := httptest.NewRecorder()
@@ -185,8 +183,6 @@ func TestHandleNarInfoRoute_CacheMiss(t *testing.T) {
 	s.indexMu.Lock()
 	s.index = &oci.CacheIndex{Entries: map[string]oci.IndexItem{}}
 	s.indexMu.Unlock()
-
-	s.cacheSvc = newCacheService(s)
 
 	req := httptest.NewRequest("GET", "/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.narinfo", nil)
 	req.SetPathValue("hash", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")

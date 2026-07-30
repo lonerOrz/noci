@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"noci/pkg/domain/types"
 	"noci/pkg/log"
 	"os"
 	"strings"
@@ -143,7 +144,15 @@ func (ms *manifestService) RepairIndexEntry(ctx context.Context, hash string, in
 	digest := manifest.Layers[0].Digest
 	size := manifest.Layers[0].Size
 
-	index.AddEntry(hash, name, narinfo, digest, size, refs)
+	nixHash, hErr := types.ParseNixHash(hash)
+	ociDigest, dErr := types.ParseOciDigest(digest)
+	if hErr != nil {
+		return fmt.Errorf("invalid nix hash %q: %w", hash, hErr)
+	}
+	if dErr != nil {
+		return fmt.Errorf("invalid digest %q: %w", digest, dErr)
+	}
+	index.AddEntry(nixHash, name, narinfo, ociDigest, size, refs)
 	return nil
 }
 
