@@ -35,7 +35,9 @@ jobs:
         target-repository: ${{ fromJSON(needs.parse.outputs.repos) }}
     steps:
       - uses: actions/checkout@v4
+
       - uses: cachix/install-nix-action@v30
+
       - name: Logical GC + Physical Sweep
         run: |
           nix run .#noci -- gc \
@@ -47,6 +49,7 @@ jobs:
           NOCI_REGISTRY: "ghcr.io"
           NOCI_REPO: ${{ matrix.target-repository }}
           NOCI_TOKEN: ${{ secrets.GH_TOKEN }}
+
       - name: Purge untagged packages
         if: success()
         uses: Chizkiyahu/delete-untagged-ghcr-action@v6
