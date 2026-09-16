@@ -52,4 +52,4 @@ jobs:
         run: |
           ISO_PATH=$(nix build github:lonerOrz/loneros-nixos#packages.x86_64-linux.iso --print-out-paths --no-link -L)
           nix path-info -sh "$ISO_PATH"
-          go run . push "$ISO_PATH" --profile
+          go run . push "$ISO_PATH" --profile --signing-key "${{ secrets.NOCI_SIGNING_KEY }}"
