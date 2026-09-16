@@ -19,6 +19,7 @@ var (
 	proxyAuthKey    string
 	proxyRateLimit  float64
 	proxyPortFile   string
+	proxyCacheDir   string
 )
 
 var proxyCmd = &cobra.Command{
@@ -43,6 +44,7 @@ func init() {
 	proxyCmd.Flags().StringVar(&proxyAuthKey, "auth-key", "", "Authentication key for proxy access (env: NOCI_AUTH_KEY)")
 	proxyCmd.Flags().Float64Var(&proxyRateLimit, "rate-limit", 0, "Max requests per second per IP (0 = unlimited)")
 	proxyCmd.Flags().StringVar(&proxyPortFile, "port-file", "", "Write resolved listening port to file")
+	proxyCmd.Flags().StringVar(&proxyCacheDir, "cache-dir", "", "Directory to store local index cache (default: systemd CACHE_DIRECTORY or ~/.cache/noci)")
 }
 
 func runProxy(cmd *cobra.Command, args []string) error {
@@ -69,7 +71,7 @@ func runProxy(cmd *cobra.Command, args []string) error {
 	}
 
 	addr := proxyListen + ":" + strconv.Itoa(proxyPort)
-	srv := server.NewServer(cfg.Registry, cfg.Repo, cfg.Token, addr, authKey, proxyRateLimit, effectiveUpstreams)
+	srv := server.NewServer(cfg.Registry, cfg.Repo, cfg.Token, addr, authKey, proxyRateLimit, effectiveUpstreams, proxyCacheDir)
 	if proxyPortFile != "" {
 		srv.SetPortFile(proxyPortFile)
 	}

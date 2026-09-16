@@ -370,6 +370,15 @@ func (s *Server) deletePackage(ctx context.Context, hash string) error {
 	s.lastDigest = newDigest
 	s.indexMu.Unlock()
 
+	// Persist immediately so a killed process doesn't resurrect the deleted package.
+	if s.diskCache != nil {
+		s.indexMu.RLock()
+		if err := s.diskCache.Save(index, newDigest); err != nil {
+			log.Warning("[noci-proxy][delete] Failed to persist deleted index to disk: %v", err)
+		}
+		s.indexMu.RUnlock()
+	}
+
 	go func() {
 		bgCtx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 		defer cancel()
