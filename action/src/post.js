@@ -8,7 +8,7 @@ async function run() {
   const registry = utils.getState("registry") || "ghcr.io";
   const repo = utils.getState("repo");
   const signingKey =
-    process.env.NOCI_SIGNING_KEY || process.env.INPUT_SIGNING_KEY;
+    (process.env.NOCI_SIGNING_KEY || process.env.INPUT_SIGNING_KEY) || "";
 
   if (!signingKey) {
     console.log(

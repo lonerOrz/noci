@@ -44,6 +44,7 @@ function loadConfig() {
   utils.exportVariable("NOCI_REPO", repo);
   utils.exportVariable("NOCI_TOKEN", token);
   if (signingKey) utils.exportVariable("NOCI_SIGNING_KEY", signingKey);
+  else utils.exportVariable("NOCI_SIGNING_KEY", "");
   utils.exportVariable("NOCI_NO_UPSTREAM", noUpstream);
 
   return {
