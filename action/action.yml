@@ -47,6 +47,10 @@ inputs:
     description: "Port for local proxy (0 = dynamic ephemeral port)"
     required: false
     default: "0"
+  no-upstream:
+    description: "Disable upstream fallback to cache.nixos.org (default: true — recommended for CI)"
+    required: false
+    default: "true"
 
 outputs:
   proxy-url:

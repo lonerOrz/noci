@@ -291,23 +291,63 @@ func (p *Publisher) stageDiffIndex(ctx context.Context, store oci.Store, inputPa
 		return nil, fmt.Errorf("failed to get closure: %w", err)
 	}
 
-	var missing []struct {
-		path string
-		hash string
+	// Fetch all path metadata upfront so signature filtering can skip network
+	// HEAD requests for paths already cached by external substituters.
+	infos, err := p.runner.GetPathInfos(ctx, closure)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get path infos: %w", err)
 	}
+
+	// Filter upstream-cached paths locally before any network calls.
+	// Paths downloaded from any substituter carry at least one foreign signature;
+	// only locally built paths have empty signatures.
+	var candidatePaths []nix.PathInfo
+	skippedUpstreamCount := 0
+
 	for _, path := range closure {
-		hash := nix.GetPathHash(path)
+		info, ok := infos[path]
+		if !ok {
+			continue
+		}
+
+		if p.skipUpstream {
+			if p.isUpstreamCached(info) {
+				skippedUpstreamCount++
+				continue
+			}
+		}
+
+		candidatePaths = append(candidatePaths, info)
+	}
+
+	if skippedUpstreamCount > 0 {
+		p.logger.Success("Skipped %d upstream-cached paths (local signature check).", skippedUpstreamCount)
+	}
+
+	// Only the OCI existence check below is network-bound; diff against index first
+	// to minimize the number of concurrent HEAD requests.
+	var missing []nix.PathInfo
+	for _, info := range candidatePaths {
+		hash := nix.GetPathHash(info.Path)
 		if _, exists := index.Entries[hash]; !exists {
-			missing = append(missing, struct {
-				path string
-				hash string
-			}{path, hash})
+			missing = append(missing, info)
 		}
 	}
 
+	if len(missing) == 0 {
+		if tDiff != nil {
+			*tDiff = time.Now()
+		}
+		return &diffResult{index: index, indexDigest: indexDigest}, nil
+	}
+
+	// Network probes are the most expensive step here. By this point we've already
+	// discarded all upstream-cached paths, so only genuinely new local builds hit the wire.
+	p.logger.Action("Checking remote status for %d potential new paths...", len(missing))
+
 	type checkResult struct {
+		info   nix.PathInfo
 		hash   string
-		path   string
 		exists bool
 	}
 	resultChan := make(chan checkResult, len(missing))
@@ -317,31 +357,33 @@ func (p *Publisher) stageDiffIndex(ctx context.Context, store oci.Store, inputPa
 	for _, m := range missing {
 		checkSem <- struct{}{}
 		checkWg.Add(1)
-		go func(path, hash string) {
+		go func(info nix.PathInfo) {
 			defer func() {
 				<-checkSem
 				checkWg.Done()
 			}()
+			hash := nix.GetPathHash(info.Path)
 			exists, _ := store.ManifestExists(ctx, hash)
-			resultChan <- checkResult{hash: hash, path: path, exists: exists}
-		}(m.path, m.hash)
+			resultChan <- checkResult{info: info, hash: hash, exists: exists}
+		}(m)
 	}
 	checkWg.Wait()
 	close(resultChan)
 
-	var uncachedPaths []string
+	var uploadList []nix.PathInfo
 	var repairCount int
+
 	for res := range resultChan {
 		if res.exists {
 			if err := store.RepairIndexEntry(ctx, res.hash, index); err != nil {
 				p.logger.Warning("Failed to repair index entry for %s: %v", res.hash, err)
-				uncachedPaths = append(uncachedPaths, res.path)
+				uploadList = append(uploadList, res.info)
 			} else {
 				repairCount++
 			}
 			continue
 		}
-		uncachedPaths = append(uncachedPaths, res.path)
+		uploadList = append(uploadList, res.info)
 	}
 
 	if repairCount > 0 {
@@ -351,48 +393,7 @@ func (p *Publisher) stageDiffIndex(ctx context.Context, store oci.Store, inputPa
 		p.logger.Success("Repaired %d stale index entries.", repairCount)
 	}
 
-	if len(uncachedPaths) == 0 {
-		if tDiff != nil {
-			*tDiff = time.Now()
-		}
-		return &diffResult{index: index, indexDigest: indexDigest}, nil
-	}
-
-	infos, err := p.runner.GetPathInfos(ctx, uncachedPaths)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get path infos: %w", err)
-	}
-
-	var uploadList []nix.PathInfo
-	skippedUpstreamCount := 0
-
-	for _, path := range uncachedPaths {
-		info, ok := infos[path]
-		if !ok {
-			continue
-		}
-
-		if p.skipUpstream {
-			skip := false
-			for _, sig := range info.Signatures {
-				if strings.HasPrefix(sig, "cache.nixos.org-1:") {
-					skippedUpstreamCount++
-					skip = true
-					break
-				}
-			}
-			if skip {
-				continue
-			}
-		}
-		uploadList = append(uploadList, info)
-	}
-
-	if skippedUpstreamCount > 0 {
-		p.logger.Success("Skipped %d upstream-cached paths.", skippedUpstreamCount)
-	}
-
-	// Sort by size descending so large files start first
+	// Upload largest files first so the pipeline is I/O-bound sooner rather than later.
 	sort.Slice(uploadList, func(i, j int) bool {
 		return uploadList[i].NarSize > uploadList[j].NarSize
 	})
@@ -406,6 +407,31 @@ func (p *Publisher) stageDiffIndex(ctx context.Context, store oci.Store, inputPa
 		index:       index,
 		indexDigest: indexDigest,
 	}, nil
+}
+
+// isUpstreamCached reports whether the path was obtained from an external substituter.
+// A path with no signatures was built locally; a path signed only by our own key
+// was previously uploaded by us. Any other signature indicates an outside source.
+func (p *Publisher) isUpstreamCached(info nix.PathInfo) bool {
+	if len(info.Signatures) == 0 {
+		return false
+	}
+
+	myKeyPrefix := ""
+	if p.signer != nil && p.signer.KeyName != "" {
+		myKeyPrefix = p.signer.KeyName + ":"
+	}
+
+	for _, sig := range info.Signatures {
+		// Skip signatures we issued ourselves — those mean "already cached by us", not "fetched upstream".
+		if myKeyPrefix != "" && strings.HasPrefix(sig, myKeyPrefix) {
+			continue
+		}
+		// Any foreign signature proves the path came from an external substituter.
+		return true
+	}
+
+	return false
 }
 
 // stageUploadConcurrently exports NARs, uploads blobs, and pushes manifests in parallel.

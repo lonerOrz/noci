@@ -148,7 +148,13 @@ func resolveInputs(ctx context.Context, args []string) ([]string, error) {
 }
 
 // readStdinPaths reads store paths from stdin (JSON array or newline-delimited).
+// Returns nil (without blocking) when stdin is a TTY so callers can fall back to an error.
 func readStdinPaths() []string {
+	stat, err := os.Stdin.Stat()
+	if err == nil && (stat.Mode()&os.ModeCharDevice) != 0 {
+		return nil
+	}
+
 	stdinBytes, err := io.ReadAll(os.Stdin)
 	if err != nil || len(stdinBytes) == 0 {
 		return nil

@@ -3,7 +3,7 @@ const fs = require("fs");
 const http = require("http");
 const utils = require("./utils");
 
-async function startProxy(binPath, proxyPort) {
+async function startProxy(binPath, proxyPort, signingKey, noUpstream) {
   const runId = process.env.GITHUB_RUN_ID || "default";
   const runAttempt = process.env.GITHUB_RUN_ATTEMPT || "1";
   const suffix = `${runId}-${runAttempt}`;
@@ -26,15 +26,28 @@ done`,
 
   const logPath = `/tmp/noci-proxy-${suffix}.log`;
   const portFilePath = `/tmp/noci-proxy-${suffix}.port`;
+  utils.saveState("proxy-log-path", logPath);
+  utils.saveState("proxy-port-path", portFilePath);
   const logFd = fs.openSync(logPath, "w");
-  const proc = cp.spawn(
-    binPath,
-    ["proxy", "--port", proxyPort, "--port-file", portFilePath],
-    {
-      detached: true,
-      stdio: ["ignore", logFd, logFd],
-    },
-  );
+
+  // Disable upstream fallback in CI by default: Nix already probes cache.nixos.org
+  // concurrently, so serial proxy-to-upstream calls only add latency and
+  // risk circuit-breaker trips during transient network hiccups.
+  const proxyArgs = [
+    "proxy",
+    "--port",
+    proxyPort,
+    "--port-file",
+    portFilePath,
+  ];
+  if (noUpstream !== "false") {
+    proxyArgs.push("--no-upstream");
+  }
+
+  const proc = cp.spawn(binPath, proxyArgs, {
+    detached: true,
+    stdio: ["ignore", logFd, logFd],
+  });
   proc.unref();
   utils.saveState("proxy-pid", proc.pid.toString());
 
@@ -42,10 +55,20 @@ done`,
   const proxyUrl = `http://127.0.0.1:${port}`;
   utils.exportOutput("proxy-url", proxyUrl);
 
-  const pubKey = await fetchPublicKey(proxyUrl);
+  // Derive public key locally when we have the signing key — avoids a network
+  // round-trip to the OCI registry that could fail under slow CI networks and
+  // silently degrade to non-cached mode.
+  let pubKey = utils.derivePublicKey(signingKey);
+  if (!pubKey) {
+    pubKey = await fetchPublicKey(proxyUrl);
+  }
+
   configureNix(hookScriptPath, proxyUrl, pubKey);
 
   console.log(`[noci-action] Proxy active at ${proxyUrl}`);
+  if (pubKey) {
+    console.log(`[noci-action] Configured trusted public key: ${pubKey}`);
+  }
 }
 
 function waitForPortFile(portFilePath, timeoutMs = 30000) {

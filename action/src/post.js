@@ -8,7 +8,7 @@ async function run() {
   const registry = utils.getState("registry") || "ghcr.io";
   const repo = utils.getState("repo");
   const signingKey =
-    process.env.NOCI_SIGNING_KEY || process.env.INPUT_SIGNING_KEY;
+    (process.env.NOCI_SIGNING_KEY || process.env.INPUT_SIGNING_KEY) || "";
 
   if (!signingKey) {
     console.log(
@@ -106,8 +106,20 @@ function push(registry, repo, signingKey, token, pushArgs, paths) {
       }),
     });
 
-    proc.stdin.write(paths.join("\n"));
-    proc.stdin.end();
+    const body = paths.join("\n") + "\n";
+
+    proc.stdin.on("error", (err) => {
+      reject(new Error(`noci push stdin write failed: ${err.message}`));
+    });
+
+    const written = proc.stdin.write(body);
+    if (!written) {
+      proc.stdin.once("drain", () => {
+        proc.stdin.end();
+      });
+    } else {
+      proc.stdin.end();
+    }
     proc.on("close", (code) => {
       if (code === 0) resolve();
       else reject(new Error(`noci push exited with code ${code}`));
@@ -116,7 +128,7 @@ function push(registry, repo, signingKey, token, pushArgs, paths) {
 }
 
 function cleanup(proxyPid) {
-  for (const key of ["hook-log-path", "hook-script-path"]) {
+  for (const key of ["hook-log-path", "hook-script-path", "proxy-log-path", "proxy-port-path"]) {
     const f = utils.getState(key);
     if (f)
       try {

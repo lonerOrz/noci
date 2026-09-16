@@ -30,7 +30,7 @@ func ExecuteContext(ctx context.Context) error {
 	case verbosity >= 2:
 		log.SetVerbosity(log.Verbose)
 	case verbosity >= 1:
-		// Normal is default, -v alone doesn't change behavior yet
+		log.SetVerbosity(log.Verbose)
 	}
 	return RootCmd.ExecuteContext(ctx)
 }

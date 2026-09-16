@@ -43,6 +43,7 @@ type Server struct {
 	negCache       sync.Map
 	lastFetch      time.Time
 	lastDigest     string
+	diskCache      *DiskIndexCache
 	canDelete      bool
 	authKey        string
 	metrics        metrics
@@ -50,7 +51,7 @@ type Server struct {
 	cb             *CircuitBreaker
 }
 
-func NewServer(registry, repo, token, addr, authKey string, rateLimit float64, upstreams []string) *Server {
+func NewServer(registry, repo, token, addr, authKey string, rateLimit float64, upstreams []string, cacheDir string) *Server {
 	if registry == "" || repo == "" || addr == "" {
 		panic("server: registry, repo, and addr must not be empty")
 	}
@@ -96,6 +97,7 @@ func NewServer(registry, repo, token, addr, authKey string, rateLimit float64, u
 		store:          client,
 		upstreamProxy:  proxy,
 		upstreamExtras: extras,
+		diskCache:      NewDiskIndexCache(cacheDir, registry, repo),
 		authKey:        authKey,
 		metrics:        metrics{counts: make(map[string]int), startTime: time.Now()},
 		limiter:        limiter,
@@ -189,14 +191,31 @@ func (s *Server) setupMux() *http.ServeMux {
 }
 
 func (s *Server) Start(ctx context.Context) error {
-	warmCtx, cancel := context.WithTimeout(ctx, oci.DefaultHTTPTimeout)
-	if exists, digest := s.store.ManifestExists(warmCtx, "noci-index"); exists {
-		s.lastDigest = digest
+	// Warm from local disk first so the proxy is ready in ~0ms even if OCI is unreachable.
+	if s.diskCache != nil {
+		if diskIdx, diskDigest, err := s.diskCache.Load(); err == nil && diskIdx != nil {
+			s.indexMu.Lock()
+			s.index = diskIdx
+			s.lastDigest = diskDigest
+			s.lastFetch = time.Now()
+			s.indexMu.Unlock()
+			log.Success("Loaded %d package entries from local disk cache (%s)", s.indexCount(), shortDigest(s.lastDigest))
+		}
 	}
-	if err := s.RefreshIndex(warmCtx); err != nil {
-		log.Warning("Initial cache warm failed: %v", err)
+
+	warmCtx, cancel := context.WithTimeout(ctx, oci.DefaultHTTPTimeout)
+	exists, digest := s.store.ManifestExists(warmCtx, "noci-index")
+	if exists && digest != "" && digest == s.lastDigest {
+		log.Success("Local disk cache is already up-to-date with remote OCI (%s)", shortDigest(digest))
 	} else {
-		log.Success("Cache warmed. Package Entries: %d, Initial Digest: %s", s.indexCount(), shortDigest(s.lastDigest))
+		if exists {
+			s.lastDigest = digest
+		}
+		if err := s.RefreshIndex(warmCtx); err != nil {
+			log.Warning("Remote cache warm failed: %v (operating with local disk cache)", err)
+		} else {
+			log.Success("Cache warmed from OCI. Package Entries: %d, Digest: %s", s.indexCount(), shortDigest(s.lastDigest))
+		}
 	}
 	cancel()
 
@@ -241,7 +260,21 @@ func (s *Server) RefreshIndex(ctx context.Context) error {
 	s.indexMu.Lock()
 	s.index = idx
 	s.lastFetch = time.Now()
+	digest := s.lastDigest
 	s.indexMu.Unlock()
+
+	// Persist to disk in the background so subsequent restarts can cold-start fast.
+	// Hold RLock while saving to prevent concurrent map iteration/write panics
+	// from deletePackage or active-sync writes that happen concurrently.
+	if s.diskCache != nil {
+		go func(savedIdx *oci.CacheIndex, savedDigest string) {
+			s.indexMu.RLock()
+			defer s.indexMu.RUnlock()
+			if err := s.diskCache.Save(savedIdx, savedDigest); err != nil {
+				log.Warning("Failed to persist index to disk: %v", err)
+			}
+		}(idx, digest)
+	}
 
 	return nil
 }

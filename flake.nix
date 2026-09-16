@@ -18,7 +18,9 @@
     in
     {
       packages = forAllSystems (system: {
-        noci = nixpkgs.legacyPackages.${system}.callPackage ./nix/package.nix { };
+        noci = nixpkgs.legacyPackages.${system}.callPackage ./nix/package.nix {
+          version = self.shortRev or self.dirtyShortRev or "0.1.0-dev";
+        };
         default = self.packages.${system}.noci;
       });
 

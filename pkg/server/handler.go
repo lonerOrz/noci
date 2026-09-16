@@ -370,6 +370,15 @@ func (s *Server) deletePackage(ctx context.Context, hash string) error {
 	s.lastDigest = newDigest
 	s.indexMu.Unlock()
 
+	// Persist immediately so a killed process doesn't resurrect the deleted package.
+	if s.diskCache != nil {
+		s.indexMu.RLock()
+		if err := s.diskCache.Save(index, newDigest); err != nil {
+			log.Warning("[noci-proxy][delete] Failed to persist deleted index to disk: %v", err)
+		}
+		s.indexMu.RUnlock()
+	}
+
 	go func() {
 		bgCtx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 		defer cancel()
@@ -464,6 +473,13 @@ func (s *Server) getPaginatedIndex(page, limit int, search string) (*PaginatedRe
 // --- Upstream proxy fallback ---
 
 func (s *Server) proxyToUpstream(w http.ResponseWriter, r *http.Request, path string) {
+	// No upstream configured — let Nix handle the miss directly without
+	// consuming a circuit-breaker slot.
+	if s.upstream == "" && len(s.upstreamExtras) == 0 && s.upstreamProxy == nil {
+		http.NotFound(w, r)
+		return
+	}
+
 	if !s.cb.Allow() {
 		http.Error(w, "Upstream temporarily unavailable (circuit breaker open)", http.StatusServiceUnavailable)
 		return

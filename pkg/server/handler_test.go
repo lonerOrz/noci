@@ -195,3 +195,54 @@ func TestHandleNarInfoRoute_CacheMiss(t *testing.T) {
 		t.Error("cache miss should not return 200")
 	}
 }
+
+func TestProxyToUpstream_NoUpstream_Returns404WithoutCircuitBreaker(t *testing.T) {
+	s := &Server{
+		upstream:       "",
+		upstreamProxy:  nil,
+		upstreamExtras: nil,
+		cb:             NewCircuitBreaker(5, 30*time.Second),
+	}
+
+	req := httptest.NewRequest("GET", "/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.narinfo", nil)
+	w := httptest.NewRecorder()
+
+	s.proxyToUpstream(w, req, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.narinfo")
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", w.Code)
+	}
+	// Circuit breaker should remain closed (state 0) since no upstream was tried.
+	if s.cb.State() != 0 {
+		t.Errorf("cb state = %d, want 0 (closed)", s.cb.State())
+	}
+}
+
+func TestProxyToUpstream_WithUpstream_StillUsesCircuitBreaker(t *testing.T) {
+	// A real HTTP server that always returns 502 so the upstream call definitely
+	// records a circuit-breaker failure.
+	mockUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer mockUpstream.Close()
+
+	s := &Server{
+		upstream:       mockUpstream.URL,
+		upstreamProxy:  nil,
+		upstreamExtras: nil,
+		cb:             NewCircuitBreaker(1, 30*time.Second),
+	}
+
+	req := httptest.NewRequest("GET", "/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.narinfo", nil)
+	w := httptest.NewRecorder()
+
+	s.proxyToUpstream(w, req, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.narinfo")
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", w.Code)
+	}
+	// The upstream returned 502 → RecordFailure → circuit breaker opens (threshold=1).
+	if s.cb.State() != CircuitOpen {
+		t.Errorf("cb state = %d, want 1 (open after threshold=1 failure)", s.cb.State())
+	}
+}

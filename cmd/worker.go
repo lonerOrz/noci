@@ -21,10 +21,11 @@ func runConcurrent[T any](ctx context.Context, items []T, concurrency int, fn fu
 	sem := make(chan struct{}, concurrency)
 	var wg sync.WaitGroup
 
+outer:
 	for i, item := range items {
 		select {
 		case <-ctx.Done():
-			break
+			break outer
 		case sem <- struct{}{}:
 		}
 

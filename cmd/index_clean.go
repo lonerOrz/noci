@@ -113,6 +113,9 @@ func runIndexClean(cmd *cobra.Command, args []string) error {
 	// Remove corrupted entries from index.
 	for _, c := range corrupted {
 		delete(index.Entries, c.hash)
+		if index.Roots != nil {
+			delete(index.Roots, c.hash)
+		}
 	}
 	index.Generated = time.Now()
 
