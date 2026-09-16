@@ -421,8 +421,49 @@ func TestStageMergeIndex_SlowPath(t *testing.T) {
 		t.Error("slow-path should NOT reuse the initial index object")
 	}
 
-	// Entry should still be added
-	if _, ok := mock.pushedIndex.Entries["0abc1234567890abc1234567890abc12"]; !ok {
-		t.Error("expected entry to be added to slow-path index")
+  // Entry should still be added
+  if _, ok := mock.pushedIndex.Entries["0abc1234567890abc1234567890abc12"]; !ok {
+    t.Error("expected entry to be added to slow-path index")
+  }
+}
+
+func TestIsUpstreamCached(t *testing.T) {
+	mySigner := &nix.Signer{KeyName: "noci"}
+
+	cases := []struct {
+		name     string
+		sig      string
+		signer   *nix.Signer
+		expected bool
+	}{
+		{"no signatures → local build", "", mySigner, false},
+		{"cache.nixos.org-1 signature → upstream", "cache.nixos.org-1:abc", mySigner, true},
+		{"garnix.io signature → upstream", "garnix.io:abc", mySigner, true},
+		{"chaotic signature → upstream", "chaotic-nyx:abc", mySigner, true},
+		{"our own signature → not upstream", "noci:abc", mySigner, false},
+		{"mixed own + foreign → upstream (foreign wins)", "", mySigner, true},
+		{"no signer, any signature → upstream", "some-key:abc", nil, true},
+		{"empty signer key, foreign sig → upstream", "cache.nixos.org-1:abc", &nix.Signer{KeyName: ""}, true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pub := &Publisher{signer: tc.signer, skipUpstream: true}
+			info := nix.PathInfo{
+				Path:       "/nix/store/0abc1234567890abc1234567890abc12-pkg",
+				NarHash:    "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+				NarSize:    1024,
+				References: nil,
+			}
+			if tc.sig != "" {
+				info.Signatures = []string{tc.sig}
+			}
+			if tc.name == "mixed own + foreign → upstream (foreign wins)" {
+				info.Signatures = []string{"noci:abc", "cache.nixos.org-1:def"}
+			}
+			if got := pub.isUpstreamCached(info); got != tc.expected {
+				t.Errorf("isUpstreamCached() = %v, want %v", got, tc.expected)
+			}
+		})
 	}
 }
