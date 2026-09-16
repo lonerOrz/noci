@@ -12,6 +12,8 @@ function loadConfig() {
   const signingKey =
     utils.getEnvOrInput("NOCI_SIGNING_KEY", "signing-key") || "";
   const proxyPort = utils.getEnvOrInput("NOCI_PROXY_PORT", "proxy-port") || "0";
+  const noUpstream =
+    utils.getEnvOrInput("NOCI_NO_UPSTREAM", "no-upstream") || "true";
 
   const compression =
     utils.getEnvOrInput("NOCI_COMPRESSION", "compression") || "zstd";
@@ -35,12 +37,14 @@ function loadConfig() {
   utils.saveState("compression-level", compressionLevel);
   utils.saveState("jobs", jobs);
   utils.saveState("fail-on-error", failOnError ? "true" : "false");
+  utils.saveState("no-upstream", noUpstream);
 
   // Broadcast to subsequent steps
   utils.exportVariable("NOCI_REGISTRY", registry);
   utils.exportVariable("NOCI_REPO", repo);
   utils.exportVariable("NOCI_TOKEN", token);
   if (signingKey) utils.exportVariable("NOCI_SIGNING_KEY", signingKey);
+  utils.exportVariable("NOCI_NO_UPSTREAM", noUpstream);
 
   return {
     registry,
@@ -48,6 +52,7 @@ function loadConfig() {
     token,
     signingKey,
     proxyPort,
+    noUpstream,
     compression,
     compressionLevel,
     jobs,

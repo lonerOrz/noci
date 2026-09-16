@@ -3,7 +3,7 @@ const fs = require("fs");
 const http = require("http");
 const utils = require("./utils");
 
-async function startProxy(binPath, proxyPort, signingKey) {
+async function startProxy(binPath, proxyPort, signingKey, noUpstream) {
   const runId = process.env.GITHUB_RUN_ID || "default";
   const runAttempt = process.env.GITHUB_RUN_ATTEMPT || "1";
   const suffix = `${runId}-${runAttempt}`;
@@ -28,7 +28,7 @@ done`,
   const portFilePath = `/tmp/noci-proxy-${suffix}.port`;
   const logFd = fs.openSync(logPath, "w");
 
-  // Disable upstream fallback in CI: Nix already probes cache.nixos.org
+  // Disable upstream fallback in CI by default: Nix already probes cache.nixos.org
   // concurrently, so serial proxy-to-upstream calls only add latency and
   // risk circuit-breaker trips during transient network hiccups.
   const proxyArgs = [
@@ -37,8 +37,10 @@ done`,
     proxyPort,
     "--port-file",
     portFilePath,
-    "--no-upstream",
   ];
+  if (noUpstream !== "false") {
+    proxyArgs.push("--no-upstream");
+  }
 
   const proc = cp.spawn(binPath, proxyArgs, {
     detached: true,

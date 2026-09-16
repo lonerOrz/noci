@@ -106,8 +106,20 @@ function push(registry, repo, signingKey, token, pushArgs, paths) {
       }),
     });
 
-    proc.stdin.write(paths.join("\n"));
-    proc.stdin.end();
+    const body = paths.join("\n") + "\n";
+
+    proc.stdin.on("error", (err) => {
+      reject(new Error(`noci push stdin write failed: ${err.message}`));
+    });
+
+    const written = proc.stdin.write(body);
+    if (!written) {
+      proc.stdin.once("drain", () => {
+        proc.stdin.end();
+      });
+    } else {
+      proc.stdin.end();
+    }
     proc.on("close", (code) => {
       if (code === 0) resolve();
       else reject(new Error(`noci push exited with code ${code}`));
