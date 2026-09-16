@@ -464,6 +464,13 @@ func (s *Server) getPaginatedIndex(page, limit int, search string) (*PaginatedRe
 // --- Upstream proxy fallback ---
 
 func (s *Server) proxyToUpstream(w http.ResponseWriter, r *http.Request, path string) {
+	// No upstream configured — let Nix handle the miss directly without
+	// consuming a circuit-breaker slot.
+	if s.upstream == "" && len(s.upstreamExtras) == 0 && s.upstreamProxy == nil {
+		http.NotFound(w, r)
+		return
+	}
+
 	if !s.cb.Allow() {
 		http.Error(w, "Upstream temporarily unavailable (circuit breaker open)", http.StatusServiceUnavailable)
 		return

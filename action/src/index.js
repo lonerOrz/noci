@@ -8,7 +8,7 @@ async function run() {
     const actionRoot = require("path").resolve(__dirname, "../..");
     const config = loadConfig();
     const binPath = await ensureBinary(actionRoot);
-    await startProxy(binPath, config.proxyPort);
+    await startProxy(binPath, config.proxyPort, config.signingKey);
   } catch (error) {
     const failOnError = utils.getState("fail-on-error") === "true";
     if (failOnError) {
