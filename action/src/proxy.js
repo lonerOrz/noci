@@ -26,6 +26,8 @@ done`,
 
   const logPath = `/tmp/noci-proxy-${suffix}.log`;
   const portFilePath = `/tmp/noci-proxy-${suffix}.port`;
+  utils.saveState("proxy-log-path", logPath);
+  utils.saveState("proxy-port-path", portFilePath);
   const logFd = fs.openSync(logPath, "w");
 
   // Disable upstream fallback in CI by default: Nix already probes cache.nixos.org

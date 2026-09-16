@@ -128,7 +128,7 @@ function push(registry, repo, signingKey, token, pushArgs, paths) {
 }
 
 function cleanup(proxyPid) {
-  for (const key of ["hook-log-path", "hook-script-path"]) {
+  for (const key of ["hook-log-path", "hook-script-path", "proxy-log-path", "proxy-port-path"]) {
     const f = utils.getState(key);
     if (f)
       try {
