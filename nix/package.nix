@@ -1,11 +1,12 @@
 {
   lib,
   buildGoModule,
+  version ? "0.1.0",
 }:
 
 buildGoModule {
   pname = "noci";
-  version = "0-unstable-20260605";
+  inherit version;
   src = ../.;
 
   vendorHash = "sha256-qdQ+GvPB+AZ9Heb28HFlHcZYpHJ4/flgE6LMVvyHGJ8=";
@@ -14,6 +15,7 @@ buildGoModule {
   ldflags = [
     "-s"
     "-w"
+    "-X noci/cmd.version=${version}"
   ];
   doCheck = false;
 

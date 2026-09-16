@@ -33,8 +33,10 @@ done`,
   // risk circuit-breaker trips during transient network hiccups.
   const proxyArgs = [
     "proxy",
-    "--port", proxyPort,
-    "--port-file", portFilePath,
+    "--port",
+    proxyPort,
+    "--port-file",
+    portFilePath,
     "--no-upstream",
   ];
 

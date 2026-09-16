@@ -28,7 +28,8 @@ function derivePublicKey(signingKey) {
         format: "der",
         type: "pkcs8",
       });
-      const spki = crypto.createPublicKey(keyObject)
+      const spki = crypto
+        .createPublicKey(keyObject)
         .export({ format: "der", type: "spki" });
       rawPublic = spki.subarray(spki.length - 32);
     } else {
@@ -36,7 +37,9 @@ function derivePublicKey(signingKey) {
     }
     return `${keyName}:${rawPublic.toString("base64")}`;
   } catch (e) {
-    console.warn(`[noci-action] Failed to derive public key locally: ${e.message}`);
+    console.warn(
+      `[noci-action] Failed to derive public key locally: ${e.message}`,
+    );
     return "";
   }
 }
@@ -76,4 +79,3 @@ module.exports = {
 
   derivePublicKey,
 };
-

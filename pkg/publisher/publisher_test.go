@@ -421,10 +421,10 @@ func TestStageMergeIndex_SlowPath(t *testing.T) {
 		t.Error("slow-path should NOT reuse the initial index object")
 	}
 
-  // Entry should still be added
-  if _, ok := mock.pushedIndex.Entries["0abc1234567890abc1234567890abc12"]; !ok {
-    t.Error("expected entry to be added to slow-path index")
-  }
+	// Entry should still be added
+	if _, ok := mock.pushedIndex.Entries["0abc1234567890abc1234567890abc12"]; !ok {
+		t.Error("expected entry to be added to slow-path index")
+	}
 }
 
 func TestIsUpstreamCached(t *testing.T) {
