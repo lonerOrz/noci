@@ -50,7 +50,7 @@ jobs:
 
       - name: Build and Push ISO
         env:
-          NOCI_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NOCI_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
           ISO_PATH=$(nix build github:lonerOrz/loneros-nixos#packages.x86_64-linux.iso --print-out-paths --no-link -L)
           nix path-info -sh "$ISO_PATH"
