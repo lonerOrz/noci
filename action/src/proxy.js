@@ -55,7 +55,7 @@ done`,
 
   // Derive public key locally when we have the signing key — avoids a network
   // round-trip to the OCI registry that could fail under slow CI networks and
-  // silently退化成 non-cached mode.
+  // silently degrade to non-cached mode.
   let pubKey = utils.derivePublicKey(signingKey);
   if (!pubKey) {
     pubKey = await fetchPublicKey(proxyUrl);
