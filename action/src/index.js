@@ -1,6 +1,7 @@
 const { loadConfig } = require("./config");
 const { ensureBinary } = require("./binary");
 const { startProxy } = require("./proxy");
+const { kill } = require("./proxy");
 const utils = require("./utils");
 
 async function run() {
@@ -20,5 +21,17 @@ async function run() {
     }
   }
 }
+
+process.on("SIGTERM", () => {
+  const proxyPid = utils.getState("proxy-pid");
+  kill(proxyPid);
+  process.exit(0);
+});
+
+process.on("SIGINT", () => {
+  const proxyPid = utils.getState("proxy-pid");
+  kill(proxyPid);
+  process.exit(0);
+});
 
 run();
